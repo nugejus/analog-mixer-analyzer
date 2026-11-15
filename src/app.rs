@@ -32,6 +32,8 @@ struct Live {
     feedback: FeedbackDetector,
     curve: DisplayCurve,
     howl: Option<f32>,
+    /// cpal pauses the stream on unplug or sample-rate change without telling us, so track arrival.
+    last_data: Instant,
 }
 
 impl Live {
@@ -44,6 +46,7 @@ impl Live {
             feedback: FeedbackDetector::new(sr),
             curve: DisplayCurve::new(spectrum::display_freqs().len()),
             howl: None,
+            last_data: Instant::now(),
             input,
         }
     }
@@ -58,6 +61,9 @@ impl Live {
             .read_chunk(n)
             .map(|c| c.into_iter().collect())
             .unwrap_or_default();
+        if !data.is_empty() {
+            self.last_data = Instant::now();
+        }
         self.levels.push_interleaved(&data);
         for f in self.spectrum.push(&audio::pick_channel(&data, ch, channel)) {
             self.speech
@@ -66,6 +72,10 @@ impl Live {
             self.curve
                 .update(&spectrum::display_db(&f.bin_power, sr), HOP as f32 / sr);
         }
+    }
+
+    fn silent(&self) -> bool {
+        self.levels.silent_for(3.0) || self.last_data.elapsed() > Duration::from_secs(3)
     }
 }
 
@@ -415,7 +425,7 @@ impl eframe::App for App {
                         target: &ltass_db(self.voice),
                         clipped_recently: live.levels.clipped_within(4.0),
                         feedback_hz: live.howl,
-                        silent: live.levels.silent_for(3.0),
+                        silent: live.silent(),
                     },
                 ));
             }
@@ -533,5 +543,15 @@ mod tests {
             ["켜기 권장"]
         );
         assert_eq!(text("GAIN", gain, Action::Wait), ["—"]);
+    }
+
+    #[test]
+    fn stalled_stream_reads_as_silent() {
+        let mut live = Live::new(audio::open_demo());
+        live.last_data = Instant::now() - Duration::from_secs(4);
+        assert!(live.silent());
+        std::thread::sleep(Duration::from_millis(100));
+        live.pump(0);
+        assert!(!live.silent());
     }
 }
