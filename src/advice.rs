@@ -172,6 +172,11 @@ fn knobs(group: &ChannelGroup, act: impl Fn(usize, bool) -> Action) -> Vec<Advic
     out
 }
 
+/// 그룹의 노브 라벨(동작은 모두 `Wait`).
+pub fn labels(group: &ChannelGroup) -> Vec<Advice> {
+    knobs(group, |_, _| Action::Wait)
+}
+
 #[derive(Default)]
 pub struct AdviceEngine {
     controls: Vec<Control>,
@@ -200,7 +205,7 @@ impl AdviceEngine {
             _ => {
                 let note = if inp.silent { NO_INPUT } else { KEEP_TALKING };
                 return AdviceSet {
-                    knobs: knobs(group, |_, _| Action::Wait),
+                    knobs: labels(group),
                     notes: vec![note.into()],
                     level_offset_db: 0.0,
                 };

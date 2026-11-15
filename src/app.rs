@@ -1,7 +1,7 @@
 use eframe::egui::{
-    self, Align, Color32, Layout, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Vec2, vec2,
+    self, Align, Align2, Color32, Layout, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Vec2, vec2,
 };
-use egui_plot::{GridMark, Legend, Line, LineStyle, Plot, PlotPoints, Points};
+use egui_plot::{GridMark, Legend, Line, LineStyle, Plot, PlotPoint, PlotPoints, Points, Text, VLine};
 use mixer_analyzer::{
     advice::{self, Action, Advice, AdviceEngine, AdviceSet, Inputs, fmt_hz},
     audio::{self, Input},
@@ -177,6 +177,7 @@ pub struct App {
     res: usize,
     analysis: Option<Analysis>,
     advice: Option<AdviceSet>,
+    show: Show,
 }
 
 impl App {
@@ -202,6 +203,7 @@ impl App {
             res: 2,
             analysis: None,
             advice: None,
+            show: Show::default(),
         }
     }
 
@@ -346,14 +348,68 @@ fn fixed_plot(id: &str, height: f32, x: (f64, f64), y: (f64, f64)) -> Plot<'_> {
         .grid_color(mocha::SURFACE1)
 }
 
+struct Show {
+    result: bool,
+    live: bool,
+    peak: bool,
+    target: bool,
+    knobs: bool,
+}
+
+impl Default for Show {
+    fn default() -> Self {
+        Self { result: true, live: true, peak: true, target: true, knobs: true }
+    }
+}
+
+/// An EQ knob's adjustable range in Hz; `mark` is the last recommended FREQ.
+struct Span {
+    label: String,
+    lo: f32,
+    hi: f32,
+    mark: Option<f32>,
+}
+
+/// Half-width in octaves of a Bell (sigma 0.6 octave).
+const BELL_OCT: f32 = 0.7;
+
+fn knob_spans(group: &ChannelGroup, advice: Option<&AdviceSet>) -> Vec<Span> {
+    advice::labels(group)
+        .into_iter()
+        .filter(|k| !k.label.starts_with("FREQ"))
+        .filter_map(|k| {
+            let (lo, hi) = match k.control {
+                Control::LowCut { hz } | Control::LowShelf { hz } => (20.0, hz),
+                Control::HighShelf { hz } => (hz, 20_000.0),
+                Control::Mid { lo_hz, hi_hz } if lo_hz == hi_hz => {
+                    (lo_hz * 2f32.powf(-BELL_OCT), lo_hz * 2f32.powf(BELL_OCT))
+                }
+                Control::Mid { lo_hz, hi_hz } => (lo_hz, hi_hz),
+                _ => return None,
+            };
+            let freq = k.label.replacen("MID", "FREQ", 1);
+            let mark = advice
+                .and_then(|a| a.knobs.iter().find(|a| a.label == freq))
+                .and_then(|a| match a.action {
+                    Action::SetFreq { hz } => Some(hz),
+                    _ => None,
+                });
+            Some(Span { label: k.label, lo, hi, mark })
+        })
+        .collect()
+}
+
 /// `result_db` is the last analysis on the display points; `target_db` is the 1/3-octave
 /// target already shifted onto the display scale.
+#[allow(clippy::too_many_arguments)]
 fn spectrum_plot(
     ui: &mut egui::Ui,
     curve: &DisplayCurve,
     result_db: Option<&[f32]>,
     target_db: Option<[f32; 25]>,
     per_oct: usize,
+    show: &Show,
+    spans: &[Span],
     height: f32,
 ) {
     let line = |name: &str, hz: &[f32], db: &[f32], color| {
@@ -390,13 +446,36 @@ fn spectrum_plot(
     })
     .legend(Legend::default())
     .show(ui, |p| {
-        if let Some(db) = result_db {
+        if show.peak {
+            p.line(line("피크", &freqs, &curve.peak_db, mocha::SURFACE2));
+        }
+        if let (true, Some(db)) = (show.result, result_db) {
             p.line(line("분석 결과", &freqs, db, mocha::GREEN).width(2.5));
         }
-        p.line(line("현재 소리", &freqs, &curve.smooth_db, mocha::BLUE));
-        p.line(line("피크", &freqs, &curve.peak_db, mocha::PEACH));
-        if let Some(t) = target_db {
+        if show.live {
+            p.line(line("현재 소리", &freqs, &curve.smooth_db, mocha::BLUE));
+        }
+        if let (true, Some(t)) = (show.target, target_db) {
             p.line(line("목표", &BANDS_HZ, &t, mocha::SUBTEXT0).style(LineStyle::dotted_dense()));
+        }
+        if show.knobs {
+            // Unnamed items stay out of the legend.
+            let step = (28.0 / spans.len().max(1) as f64).min(4.0);
+            for (i, s) in spans.iter().enumerate() {
+                let y = -2.0 - step * i as f64;
+                let bar = |lo: f32, hi: f32| {
+                    let pts: PlotPoints = [lo, hi].iter().map(|f| [f64::from(f.log10()), y]).collect();
+                    Line::new("", pts)
+                };
+                p.line(bar(s.lo, s.hi).color(mocha::OVERLAY1).width(4.0));
+                if let Some(hz) = s.mark {
+                    p.vline(VLine::new("", f64::from(hz.log10())).color(mocha::YELLOW));
+                    let (lo, hi) = (hz * 2f32.powf(-BELL_OCT), hz * 2f32.powf(BELL_OCT));
+                    p.line(bar(lo, hi).color(mocha::YELLOW).width(6.0));
+                }
+                let pos = PlotPoint::new(f64::from(s.lo.log10()), y + step * 0.4);
+                p.text(Text::new("", pos, s.label.as_str()).color(mocha::SUBTEXT0).anchor(Align2::LEFT_BOTTOM));
+            }
         }
     });
 }
@@ -625,9 +704,19 @@ impl eframe::App for App {
                     t
                 });
                 let h = (ui.available_height() - 90.0).max(120.0);
-                ui.strong("실시간 주파수 그래프");
+                ui.horizontal(|ui| {
+                    ui.strong("실시간 주파수 그래프");
+                    ui.label("표시");
+                    let sh = &mut self.show;
+                    ui.checkbox(&mut sh.result, "분석 결과");
+                    ui.checkbox(&mut sh.live, "현재 소리");
+                    ui.checkbox(&mut sh.peak, "피크");
+                    ui.checkbox(&mut sh.target, "목표");
+                    ui.checkbox(&mut sh.knobs, "노브 구간");
+                });
+                let spans = knob_spans(&self.profile.groups[self.group], advice);
                 let result = self.analysis.as_ref().and_then(|a| result_db(a, per_oct));
-                spectrum_plot(ui, &live.curve, result.as_deref(), target, per_oct, h * 0.6);
+                spectrum_plot(ui, &live.curve, result.as_deref(), target, per_oct, &self.show, &spans, h * 0.6);
                 ui.strong("레벨/디스토션 기록 (최근 30초)");
                 level_plot(ui, live.levels.history(), h * 0.4);
                 status_line(
@@ -648,6 +737,38 @@ impl eframe::App for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn spans(m: MixerModel, a: Option<&AdviceSet>) -> Vec<(String, f32, f32, Option<f32>)> {
+        knob_spans(&MixerFactory::create(m).groups[0], a).into_iter().map(|s| (s.label, s.lo, s.hi, s.mark)).collect()
+    }
+    #[test]
+    fn knob_spans_profx22v3() {
+        assert_eq!(spans(MixerModel::MackieProFx22v3, None), [
+            ("저역컷 100Hz".into(), 20.0, 100.0, None), ("HIGH 12kHz".into(), 12_000.0, 20_000.0, None),
+            ("MID".into(), 100.0, 8_000.0, None), ("LOW 80Hz".into(), 20.0, 80.0, None)]);
+    }
+    #[test]
+    fn knob_spans_mark_recommended_freq() {
+        let g = &MixerFactory::create(MixerModel::MackieProFx22v3).groups[0];
+        let mut knobs = advice::labels(g);
+        knobs.iter_mut().find(|k| k.label == "FREQ").unwrap().action = Action::SetFreq { hz: 400.0 };
+        let a = AdviceSet { knobs, notes: vec![], level_offset_db: 0.0 };
+        assert_eq!(spans(MixerModel::MackieProFx22v3, Some(&a))[2].3, Some(400.0));
+    }
+    #[test]
+    fn knob_spans_fixed_mid_and_two_sweeps() {
+        let fx12 = spans(MixerModel::MackieProFx12v3, None);
+        let m = fx12.iter().find(|s| s.0 == "MID 2.5kHz").unwrap();
+        assert!((m.1 - 2500.0 * 2f32.powf(-0.7)).abs() < 0.5 && (m.2 - 2500.0 * 2f32.powf(0.7)).abs() < 0.5);
+        let g = &MixerFactory::create(MixerModel::SoundcraftSignature22).groups[0];
+        let mut knobs = advice::labels(g);
+        knobs.iter_mut().find(|k| k.label == "FREQ 2").unwrap().action = Action::SetFreq { hz: 200.0 };
+        let a = AdviceSet { knobs, notes: vec![], level_offset_db: 0.0 };
+        let s = spans(MixerModel::SoundcraftSignature22, Some(&a));
+        let get = |l: &str| s.iter().find(|x| x.0 == l).unwrap().clone();
+        assert_eq!(get("MID 1"), ("MID 1".into(), 400.0, 8_000.0, None));
+        assert_eq!(get("MID 2"), ("MID 2".into(), 80.0, 2_000.0, Some(200.0)));
+    }
 
     #[test]
     fn dial_angle_is_log_linear() {
