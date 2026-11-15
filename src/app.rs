@@ -7,9 +7,9 @@ use mixer_analyzer::{
     audio::{self, Input},
     feedback::FeedbackDetector,
     levels::{HistPoint, LevelMeter},
-    mixers::{Control, KNOB_TRAVEL_DEG, MixerFactory, MixerModel, MixerProfile},
-    spectrum::{self, DisplayCurve, HOP, Spectrum},
-    speech::SpeechStats,
+    mixers::{ChannelGroup, Control, KNOB_TRAVEL_DEG, MixerFactory, MixerModel, MixerProfile},
+    spectrum::{self, DisplayCurve, Frame, HOP, Spectrum},
+    speech::{SpeechStats, Summary},
     target::{BANDS_HZ, Voice, ltass_db},
     theme::{self, mocha},
 };
@@ -19,19 +19,75 @@ use std::time::{Duration, Instant};
 const DEMO: &str = "데모 신호";
 const CHANNELS: [&str; 2] = ["1(L)", "2(R)"];
 const TICKS_HZ: [f64; 10] = [20.0, 50.0, 100.0, 200.0, 500.0, 1e3, 2e3, 5e3, 1e4, 2e4];
-const ADVICE_EVERY: Duration = Duration::from_millis(500);
+const SMOOTHING: [(&str, f32); 3] = [("빠름 0.3초", 0.3), ("보통 1초", 1.0), ("느림 3초", 3.0)];
 const KNOB_W: f32 = 96.0;
 const KNOB_R: f32 = 20.0;
+
+/// One press of `분석`: collects audio frames until `needed` have arrived.
+struct Recording {
+    stats: SpeechStats,
+    needed: usize,
+    /// Last howl frequency seen during the recording.
+    howl: Option<f32>,
+}
+
+impl Recording {
+    fn new(seconds: u32, hop_s: f32) -> Self {
+        Self {
+            stats: SpeechStats::new(hop_s),
+            needed: (seconds as f32 / hop_s).round() as usize,
+            howl: None,
+        }
+    }
+
+    fn push(&mut self, f: &Frame, bands: &[f32; 25], disp: &[f32], howl: Option<f32>) {
+        self.stats.push(f, bands, disp);
+        self.howl = howl.or(self.howl);
+    }
+
+    fn progress(&self) -> f32 {
+        (self.stats.frames() as f32 / self.needed as f32).min(1.0)
+    }
+
+    fn done(&self) -> bool {
+        self.stats.frames() >= self.needed
+    }
+}
+
+/// A finished recording, kept until the next one so advice can be recomputed without re-recording.
+struct Analysis {
+    summary: Option<Summary>,
+    /// Recording length; `clipped` and `silent` cover this window.
+    #[expect(dead_code, reason = "brief interface; no spec UI shows it")]
+    seconds: u32,
+    clipped: bool,
+    howl: Option<f32>,
+    silent: bool,
+}
+
+/// A fresh engine each time, so every knob starts from ✓ (no deadband state carried over).
+fn advise(a: &Analysis, group: &ChannelGroup, voice: Voice) -> AdviceSet {
+    AdviceEngine::new().advise(
+        group,
+        &Inputs {
+            summary: a.summary.as_ref(),
+            target: &ltass_db(voice),
+            clipped_recently: a.clipped,
+            feedback_hz: a.howl,
+            silent: a.silent,
+        },
+    )
+}
 
 /// An open input and the analysis state built for its sample rate and channel count.
 struct Live {
     input: Input,
     levels: LevelMeter,
     spectrum: Spectrum,
-    speech: SpeechStats,
     feedback: FeedbackDetector,
     curve: DisplayCurve,
     howl: Option<f32>,
+    rec: Option<Recording>,
     /// cpal pauses the stream on unplug or sample-rate change without telling us, so track arrival.
     last_data: Instant,
 }
@@ -42,17 +98,17 @@ impl Live {
         Self {
             levels: LevelMeter::new(sr, input.channels),
             spectrum: Spectrum::new(sr),
-            speech: SpeechStats::new(HOP as f32 / sr),
             feedback: FeedbackDetector::new(sr),
             curve: DisplayCurve::new(spectrum::display_freqs().len()),
             howl: None,
+            rec: None,
             last_data: Instant::now(),
             input,
         }
     }
 
     /// Drains whole frames from the ring and runs every analyser on them.
-    fn pump(&mut self, channel: usize) {
+    fn pump(&mut self, channel: usize, tau_s: f32) {
         let (sr, ch) = (self.input.sample_rate, self.input.channels.max(1));
         let n = self.input.rx.slots() / ch * ch;
         let data: Vec<f32> = self
@@ -67,15 +123,21 @@ impl Live {
         self.levels.push_interleaved(&data);
         for f in self.spectrum.push(&audio::pick_channel(&data, ch, channel)) {
             let display = spectrum::display_db(&f.bin_power, sr);
-            self.speech
-                .push(&f, &spectrum::third_octave_db(&f.bin_power, sr), &display);
             self.howl = self.feedback.push(&f.bin_power);
-            self.curve.update(&display, HOP as f32 / sr, 1.0);
+            self.curve.update(&display, HOP as f32 / sr, tau_s);
+            if let Some(r) = self.rec.as_mut().filter(|r| !r.done()) {
+                let bands = spectrum::third_octave_db(&f.bin_power, sr);
+                r.push(&f, &bands, &display, self.howl);
+            }
         }
     }
 
+    fn silent_for(&self, seconds: f32) -> bool {
+        self.levels.silent_for(seconds) || self.last_data.elapsed() > Duration::from_secs(3)
+    }
+
     fn silent(&self) -> bool {
-        self.levels.silent_for(3.0) || self.last_data.elapsed() > Duration::from_secs(3)
+        self.silent_for(3.0)
     }
 }
 
@@ -98,9 +160,11 @@ pub struct App {
     profile: MixerProfile,
     group: usize,
     voice: Voice,
-    engine: AdviceEngine,
+    rec_seconds: u32,
+    /// Index into `SMOOTHING`.
+    smooth: usize,
+    analysis: Option<Analysis>,
     advice: Option<AdviceSet>,
-    next_advice: Instant,
 }
 
 impl App {
@@ -121,15 +185,16 @@ impl App {
             profile: MixerFactory::create(model),
             group: 0,
             voice: Voice::Male,
-            engine: AdviceEngine::new(),
+            rec_seconds: 20,
+            smooth: 1,
+            analysis: None,
             advice: None,
-            next_advice: Instant::now(),
         }
     }
 
-    fn reset_advice(&mut self) {
-        self.engine = AdviceEngine::new();
-        self.next_advice = Instant::now();
+    fn readvise(&mut self) {
+        let group = &self.profile.groups[self.group];
+        self.advice = self.analysis.as_ref().map(|a| advise(a, group, self.voice));
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
@@ -145,7 +210,7 @@ impl App {
             });
         if model != self.model {
             (self.model, self.profile, self.group) = (model, MixerFactory::create(model), 0);
-            self.reset_advice();
+            self.readvise();
         }
         ui.label("채널");
         let mut group = self.group;
@@ -158,7 +223,7 @@ impl App {
             });
         if group != self.group {
             self.group = group;
-            self.reset_advice();
+            self.readvise();
         }
         ui.label("입력장치");
         let mut pick = self.device.clone();
@@ -177,6 +242,7 @@ impl App {
             self.device = pick;
         }
         ui.label("분석채널");
+        let channel = self.channel;
         egui::ComboBox::from_id_salt("channel")
             .selected_text(CHANNELS[self.channel])
             .show_ui(ui, |ui| {
@@ -184,13 +250,57 @@ impl App {
                     ui.selectable_value(&mut self.channel, i, label);
                 }
             });
+        if self.channel != channel
+            && let Ok(live) = &mut self.live
+        {
+            live.rec = None;
+        }
         ui.label("목표");
+        let voice = self.voice;
         ui.selectable_value(&mut self.voice, Voice::Male, "남성");
         ui.selectable_value(&mut self.voice, Voice::Female, "여성");
+        if self.voice != voice {
+            self.readvise();
+        }
+        let recording = self.live.as_ref().is_ok_and(|l| l.rec.is_some());
+        ui.label("녹음");
+        ui.add_enabled(
+            !recording,
+            egui::Slider::new(&mut self.rec_seconds, 15..=30).suffix("초"),
+        );
+        let label = if recording { "취소" } else { "분석" };
+        if ui
+            .add_enabled(self.live.is_ok(), egui::Button::new(label))
+            .clicked()
+            && let Ok(live) = &mut self.live
+        {
+            live.rec = if recording {
+                None
+            } else {
+                live.curve.reset_peak();
+                Some(Recording::new(
+                    self.rec_seconds,
+                    HOP as f32 / live.input.sample_rate,
+                ))
+            };
+        }
+        ui.label("실시간 선");
+        egui::ComboBox::from_id_salt("smooth")
+            .selected_text(SMOOTHING[self.smooth].0)
+            .show_ui(ui, |ui| {
+                for (i, (label, _)) in SMOOTHING.into_iter().enumerate() {
+                    ui.selectable_value(&mut self.smooth, i, label);
+                }
+            });
         if ui.button("클리핑 리셋").clicked()
             && let Ok(live) = &mut self.live
         {
             live.levels.reset_clips();
+        }
+        if ui.button("피크 리셋").clicked()
+            && let Ok(live) = &mut self.live
+        {
+            live.curve.reset_peak();
         }
     }
 }
@@ -209,8 +319,15 @@ fn fixed_plot(id: &str, height: f32, x: (f64, f64), y: (f64, f64)) -> Plot<'_> {
         .grid_color(mocha::SURFACE1)
 }
 
-/// `target_db` is the 1/3-octave target already shifted onto the display scale.
-fn spectrum_plot(ui: &mut egui::Ui, curve: &DisplayCurve, target_db: &[f32; 25], height: f32) {
+/// `result_db` is the last analysis on the display points; `target_db` is the 1/3-octave
+/// target already shifted onto the display scale.
+fn spectrum_plot(
+    ui: &mut egui::Ui,
+    curve: &DisplayCurve,
+    result_db: Option<&[f32]>,
+    target_db: Option<[f32; 25]>,
+    height: f32,
+) {
     let line = |name: &str, hz: &[f32], db: &[f32], color| {
         let pts: PlotPoints = hz
             .iter()
@@ -245,11 +362,14 @@ fn spectrum_plot(ui: &mut egui::Ui, curve: &DisplayCurve, target_db: &[f32; 25],
     })
     .legend(Legend::default())
     .show(ui, |p| {
+        if let Some(db) = result_db {
+            p.line(line("분석 결과", &freqs, db, mocha::GREEN).width(2.5));
+        }
         p.line(line("현재 소리", &freqs, &curve.smooth_db, mocha::BLUE));
-        p.line(
-            line("목표", &BANDS_HZ, target_db, mocha::SUBTEXT0).style(LineStyle::dotted_dense()),
-        );
-        p.line(line("피크 홀드", &freqs, &curve.peak_db, mocha::PEACH));
+        p.line(line("피크", &freqs, &curve.peak_db, mocha::PEACH));
+        if let Some(t) = target_db {
+            p.line(line("목표", &BANDS_HZ, &t, mocha::SUBTEXT0).style(LineStyle::dotted_dense()));
+        }
     });
 }
 
@@ -413,29 +533,48 @@ fn knob_row(ui: &mut egui::Ui, knobs: &[Advice]) {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        if let Ok(live) = &mut self.live {
-            live.pump(self.channel);
-            if Instant::now() >= self.next_advice {
-                self.next_advice = Instant::now() + ADVICE_EVERY;
-                let summary = live.speech.summary();
-                self.advice = Some(self.engine.advise(
-                    &self.profile.groups[self.group],
-                    &Inputs {
-                        summary: summary.as_ref(),
-                        target: &ltass_db(self.voice),
-                        clipped_recently: live.levels.clipped_within(4.0),
-                        feedback_hz: live.howl,
-                        silent: live.silent(),
-                    },
-                ));
-            }
+        let finished = self.live.as_mut().ok().and_then(|live| {
+            live.pump(self.channel, SMOOTHING[self.smooth].1);
+            let rec = live.rec.take_if(|r| r.done())?;
+            let n = self.rec_seconds as f32;
+            Some(Analysis {
+                summary: rec.stats.summary(),
+                seconds: self.rec_seconds,
+                clipped: live.levels.clipped_within(n),
+                howl: rec.howl,
+                silent: live.silent_for(n),
+            })
+        });
+        if finished.is_some() {
+            self.analysis = finished;
+            self.readvise();
         }
         egui::Panel::top("top").show(ui, |ui| ui.horizontal_wrapped(|ui| self.top_bar(ui)));
-        let advice = self.advice.as_ref().filter(|_| self.live.is_ok());
+        let (advice, live) = (self.advice.as_ref(), self.live.as_ref().ok());
+        let summary = self.analysis.as_ref().and_then(|a| a.summary.as_ref());
         egui::Panel::bottom("advice").show(ui, |ui| {
-            ui.strong("노브 추천");
+            let rec = live.and_then(|l| l.rec.as_ref());
+            if let Some(r) = rec {
+                let n = self.rec_seconds;
+                let text = format!(
+                    "녹음 중 {:.0}/{n}초 — 계속 말씀하세요",
+                    r.progress() * n as f32
+                );
+                ui.add(egui::ProgressBar::new(r.progress()).text(text));
+                if live.is_some_and(Live::silent) {
+                    ui.colored_label(mocha::RED, advice::NO_INPUT);
+                }
+            }
             if let Some(a) = advice {
+                ui.strong(summary.map_or("노브 추천".into(), |s| {
+                    format!("노브 추천 — 말소리 {:.1}초 분석", s.active_seconds)
+                }));
                 knob_row(ui, &a.knobs);
+            } else if rec.is_none() {
+                ui.label(format!(
+                    "[분석]을 누르고 {}초 동안 평소처럼 말씀하세요.",
+                    self.rec_seconds
+                ));
             }
             ui.separator();
             ui.strong("안내");
@@ -448,10 +587,11 @@ impl eframe::App for App {
             Ok(live) => {
                 let offset =
                     advice.map_or(0.0, |a| a.level_offset_db) - spectrum::DISPLAY_TO_BAND_DB;
-                let target = ltass_db(self.voice).map(|t| t + offset);
+                let target = summary.map(|_| ltass_db(self.voice).map(|t| t + offset));
                 let h = (ui.available_height() - 90.0).max(120.0);
                 ui.strong("실시간 주파수 그래프");
-                spectrum_plot(ui, &live.curve, &target, h * 0.6);
+                let result = summary.map(|s| s.display_db.as_slice());
+                spectrum_plot(ui, &live.curve, result, target, h * 0.6);
                 ui.strong("레벨/디스토션 기록 (최근 30초)");
                 level_plot(ui, live.levels.history(), h * 0.4);
                 status_line(
@@ -552,7 +692,84 @@ mod tests {
         live.last_data = Instant::now() - Duration::from_secs(4);
         assert!(live.silent());
         std::thread::sleep(Duration::from_millis(100));
-        live.pump(0);
+        live.pump(0, 1.0);
         assert!(!live.silent());
+    }
+
+    #[test]
+    fn recording_counts_audio_frames() {
+        let f = Frame {
+            bin_power: vec![],
+            rms_db: -20.0,
+            peak: 0.5,
+        };
+        let mut r = Recording::new(15, 4096.0 / 48_000.0);
+        assert_eq!(r.needed, 176);
+        for _ in 0..175 {
+            r.push(&f, &[-30.0; 25], &[], None);
+        }
+        assert!(!r.done());
+        r.push(&f, &[-30.0; 25], &[], None);
+        assert!(r.done());
+        assert_eq!(r.progress(), 1.0);
+        assert_eq!(Recording::new(20, 4096.0 / 96_000.0).needed, 469);
+        assert_eq!(Recording::new(20, 4096.0 / 44_100.0).needed, 215);
+    }
+
+    #[test]
+    fn recording_keeps_last_howl() {
+        let f = Frame {
+            bin_power: vec![],
+            rms_db: -20.0,
+            peak: 0.5,
+        };
+        let mut r = Recording::new(15, 4096.0 / 48_000.0);
+        r.push(&f, &[-30.0; 25], &[], Some(2500.0));
+        r.push(&f, &[-30.0; 25], &[], None);
+        assert_eq!(r.howl, Some(2500.0));
+    }
+
+    #[test]
+    fn analysis_without_speech_says_too_little() {
+        let a = Analysis {
+            summary: None,
+            seconds: 20,
+            clipped: false,
+            howl: None,
+            silent: false,
+        };
+        let g = &MixerFactory::create(MixerModel::MackieProFx22v3).groups[0];
+        let s = advise(&a, g, Voice::Male);
+        assert!(s.knobs.iter().all(|k| k.action == Action::Wait));
+        assert!(s.notes.iter().any(|n| n.contains("말소리가 부족합니다")));
+    }
+
+    #[test]
+    fn analysis_advice_follows_group() {
+        let s = Summary {
+            bands_db: ltass_db(Voice::Male).map(|t| t - 40.0),
+            display_db: vec![],
+            peak_db: -12.0,
+            rms_db: -30.0,
+            noise_floor_db: -80.0,
+            snr_db: 50.0,
+            dynamic_range_db: 10.0,
+            crest_db: 18.0,
+            active_seconds: 10.0,
+        };
+        let a = Analysis {
+            summary: Some(s),
+            seconds: 20,
+            clipped: false,
+            howl: None,
+            silent: false,
+        };
+        let knobs = |m| {
+            advise(&a, &MixerFactory::create(m).groups[0], Voice::Male)
+                .knobs
+                .len()
+        };
+        assert_eq!(knobs(MixerModel::MackieProFx22v3), 7);
+        assert_eq!(knobs(MixerModel::YamahaMg06x), 4);
     }
 }
