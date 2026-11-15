@@ -15,9 +15,9 @@ pub struct Saved {
     pub sample_rate: Option<u32>,
 }
 
-/// Tabs and line breaks become spaces so a field stays on its line; ends trimmed.
+/// Tabs, line breaks and U+FFFD (which marks a mis-encoded line on read) become spaces; ends trimmed.
 pub fn clean(s: &str) -> String {
-    s.replace(['\t', '\r', '\n'], " ").trim().to_owned()
+    s.replace(['\t', '\r', '\n', '\u{fffd}'], " ").trim().to_owned()
 }
 
 /// Tab-separated: name, mixer, group, dynamic range, 25 bands, then the sample rate when known (29 or 30 fields).
@@ -174,7 +174,7 @@ mod tests {
     #[test] fn bom_is_stripped() {
         assert_eq!(parse(&format!("\u{feff}{}\n", to_line(&sample("가")))), (vec![sample("가")], None));
     }
-    #[test] fn clean_removes_tabs_and_newlines() { assert_eq!(clean("  홍길동\t목사\r\n "), "홍길동 목사"); }
+    #[test] fn clean_removes_tabs_and_newlines() { assert_eq!(clean("  홍길동\t목사\r\n\u{fffd}"), "홍길동 목사"); }
     #[test] fn upsert_replaces_same_name() {
         let mut l = vec![sample("a"), sample("b")];
         let mut b2 = sample("b"); b2.dynamic_range_db = 3.0;

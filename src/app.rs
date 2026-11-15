@@ -397,8 +397,10 @@ impl App {
 
     /// Writes the saved list; a failure shows in red under 안내 and the list stays in memory.
     fn persist(&mut self) {
-        if self.write_blocked && self.save_error.is_some() {
-            return; // 줄 번호가 있는 안내를 그대로 둡니다
+        // 막힌 이유(줄 번호, 읽기 실패)가 떠 있으면 그대로 둡니다.
+        let reason = |e: &str| e.starts_with("saved.tsv의") || e.starts_with("읽지 못했습니다");
+        if self.write_blocked && self.save_error.as_deref().is_some_and(reason) {
+            return;
         }
         let r = write_list(self.dir.as_deref(), self.write_blocked, &self.saved);
         self.save_error = r.err().map(|e| format!("저장하지 못했습니다: {e}"));
@@ -1520,6 +1522,7 @@ mod tests {
     #[test] fn old_profx22v3_stereo_label_is_the_same_group() {
         let s = Saved { group: "CH15-18 (스테레오 마이크)".into(), ..saved_sample("x") };
         assert!(saved_goal(&s, &s.mixer.clone(), "CH15-20 (스테레오 마이크)", Some(48_000.0)).notes.is_empty());
+        assert_eq!(saved_goal(&s, "Mackie ProFX22 (1세대, 2011)", "CH15-20 (스테레오 마이크)", Some(48_000.0)).notes.len(), 1);
     }
     #[test] fn restore_from_saved_says_switch_off() {
         let g = &MixerFactory::create(MixerModel::MackieProFx22v3).groups[0];
