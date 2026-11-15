@@ -5,6 +5,9 @@ use crate::speech::Summary;
 use crate::target::{BANDS_HZ, TONE_BANDS, TONE_HOT_DB, hpf_db, level_match_db, tone_excess};
 
 const LAMBDA: f32 = 0.01;
+/// 복구의 저역컷 판단에 쓰는 λ. 클수록 LOW와 낮은 MID를 크게 돌려 스위치를 흉내 내는 쪽이 불리합니다.
+/// ponytail: ±1 dB 잡음 시뮬레이션으로 고른 값(0.02는 잡음에 약하고 0.05는 잡음 없을 때 틀림). 실측 녹음이 모이면 다시 고르세요.
+const SWITCH_LAMBDA: f32 = 0.03;
 const FIT_BANDS: std::ops::RangeInclusive<usize> = 2..=23; // 100 Hz–12.5 kHz
 const EQ_LIMIT_DB: f32 = 15.0;
 const LOW_BOOST_MAX_DB: f32 = 3.0;
@@ -39,6 +42,10 @@ impl Shape {
 
 /// Σ w(−d − c − Σ g·R)² + λΣg² 최소화. 반환: (gains, c, 가중 잔차 Σ w·r²).
 pub fn fit_eq(deviation: &[f32; 25], shapes: &[Shape]) -> (Vec<f32>, f32, f32) {
+    fit_eq_in(deviation, shapes, FIT_BANDS, LAMBDA)
+}
+
+fn fit_eq_in(deviation: &[f32; 25], shapes: &[Shape], bands: std::ops::RangeInclusive<usize>, lambda: f32) -> (Vec<f32>, f32, f32) {
     let n = shapes.len() + 1;
     let row = |b: usize| -> Vec<f32> {
         std::iter::once(1.0)
@@ -47,7 +54,7 @@ pub fn fit_eq(deviation: &[f32; 25], shapes: &[Shape]) -> (Vec<f32>, f32, f32) {
     };
     // 확대 행렬 [AᵀWA + λD | AᵀWy], y = −d
     let mut m = vec![vec![0.0; n + 1]; n];
-    for b in FIT_BANDS {
+    for b in bands.clone() {
         let (a, w) = (row(b), weight(b));
         for (mi, &ai) in m.iter_mut().zip(&a) {
             for (mij, &aj) in mi.iter_mut().zip(&a) {
@@ -57,7 +64,7 @@ pub fn fit_eq(deviation: &[f32; 25], shapes: &[Shape]) -> (Vec<f32>, f32, f32) {
         }
     }
     for (i, mi) in m.iter_mut().enumerate().skip(1) {
-        mi[i] += LAMBDA;
+        mi[i] += lambda;
     }
     // 대칭 양정치(Σw > 0, λ > 0)라 피벗 없이 가우스 소거해도 됩니다.
     for k in 0..n {
@@ -75,7 +82,7 @@ pub fn fit_eq(deviation: &[f32; 25], shapes: &[Shape]) -> (Vec<f32>, f32, f32) {
         let s: f32 = (i + 1..n).map(|j| m[i][j] * x[j]).sum();
         x[i] = (m[i][n] - s) / m[i][i];
     }
-    let resid = FIT_BANDS
+    let resid = bands
         .map(|b| {
             let fit: f32 = row(b).iter().zip(&x).map(|(a, x)| a * x).sum();
             weight(b) * (-deviation[b] - fit).powi(2)
@@ -218,24 +225,6 @@ impl AdviceEngine {
         let ctl = &group.controls;
         let restore = inp.restore_dynamic_range_db;
 
-        // 저역컷은 반영 전 d로 판단하고(분석은 꺼짐에서 시작하므로 켜기만), 켜기면 그 스위치 응답을 d에 반영해
-        // 같은 저역 차이를 LOW가 또 쫓지 않게 합니다. +1 켜기, 0 그대로.
-        let mean = |d: &[f32; 25], r: std::ops::RangeInclusive<usize>| {
-            d[r.clone()].iter().sum::<f32>() / r.count() as f32
-        };
-        // 보통은 c0(250 Hz–4 kHz), 복구는 125·160 Hz 기준.
-        let base = if restore.is_some() { 3..=4 } else { 6..=18 };
-        let low = mean(&d, 0..=1) - mean(&d, base);
-        let switch = if low > 3.0 { 1.0 } else { 0.0 };
-        if let Some(fc) = ctl.iter().find_map(|&c| match c {
-            Control::LowCut { hz } => Some(hz),
-            _ => None,
-        }) {
-            for (x, f) in d.iter_mut().zip(BANDS_HZ) {
-                *x += switch * hpf_db(fc, f);
-            }
-        }
-
         // EQ 노브와 각 노브의 Bell 주파수(스윕은 지난 추천, 없으면 후보 가운데).
         let eq: Vec<usize> = (0..ctl.len())
             .filter(|&i| {
@@ -247,7 +236,7 @@ impl AdviceEngine {
             .collect();
         let cands =
             |(lo, hi): (f32, f32)| -> Vec<f32> { BANDS_HZ.into_iter().filter(|f| (lo..=hi).contains(f)).collect() };
-        let mut hz: Vec<f32> = ctl
+        let hz: Vec<f32> = ctl
             .iter()
             .zip(&self.freq)
             .map(|(&c, f)| match (c, sweep(c)) {
@@ -275,47 +264,79 @@ impl AdviceEngine {
         // 다만 지난 주파수가 없는 두 스윕(앱은 늘 새 엔진)은 모든 쌍을 봅니다. 좌표 하강은 엉뚱한 쌍에 갇혀
         // 다른 노브를 ±15 dB 끝까지 돌리기도 합니다(Signature 22). 후보는 많아야 14×15쌍입니다.
         let sweeps: Vec<usize> = eq.iter().copied().filter(|&i| sweep(ctl[i]).is_some()).collect();
-        if let [a, b] = sweeps[..]
-            && self.freq[a].is_none()
-            && self.freq[b].is_none()
-        {
-            let cb = cands(sweep(ctl[b]).expect("sweep"));
-            let best = cands(sweep(ctl[a]).expect("sweep"))
-                .into_iter()
-                .flat_map(|fa| cb.iter().map(move |&fb| (fa, fb)))
-                .filter(|(fa, fb)| (fa / fb).log2().abs() >= 1.0) // 아래와 같은 1옥타브 가드
-                .map(|(fa, fb)| {
-                    let mut h = hz.clone();
-                    (h[a], h[b]) = (fa, fb);
-                    let r = fit_eq(&d, &shapes(&h)).2;
-                    (h, r)
-                })
-                .min_by(|p, q| p.1.total_cmp(&q.1));
-            if let Some((h, _)) = best {
-                hz = h;
-            }
-        } else {
-            for _ in 0..sweeps.len().min(2) {
-                for &i in &sweeps {
-                    let resid = |f: f32| {
+        let pick = |d: &[f32; 25]| -> Vec<f32> {
+            let mut hz = hz.clone();
+            if let [a, b] = sweeps[..]
+                && self.freq[a].is_none()
+                && self.freq[b].is_none()
+            {
+                let cb = cands(sweep(ctl[b]).expect("sweep"));
+                let best = cands(sweep(ctl[a]).expect("sweep"))
+                    .into_iter()
+                    .flat_map(|fa| cb.iter().map(move |&fb| (fa, fb)))
+                    .filter(|(fa, fb)| (fa / fb).log2().abs() >= 1.0) // 아래와 같은 1옥타브 가드
+                    .map(|(fa, fb)| {
                         let mut h = hz.clone();
-                        h[i] = f;
-                        fit_eq(&d, &shapes(&h)).2
-                    };
-                    // 두 스윕이 같은 주파수에서 게인을 반씩 나누면 둘 다 ✓가 되므로 1옥타브 이상 떨어뜨립니다.
-                    let best = cands(sweep(ctl[i]).expect("sweep"))
-                        .into_iter()
-                        .filter(|&f| sweeps.iter().all(|&j| j == i || (f / hz[j]).log2().abs() >= 1.0))
-                        .map(|f| (f, resid(f)))
-                        .min_by(|a, b| a.1.total_cmp(&b.1));
-                    if let Some((f, r)) = best
-                        && (self.freq[i].is_none() || r < 0.8 * resid(hz[i]))
-                    {
-                        hz[i] = f;
+                        (h[a], h[b]) = (fa, fb);
+                        let r = fit_eq(d, &shapes(&h)).2;
+                        (h, r)
+                    })
+                    .min_by(|p, q| p.1.total_cmp(&q.1));
+                if let Some((h, _)) = best {
+                    hz = h;
+                }
+            } else {
+                for _ in 0..sweeps.len().min(2) {
+                    for &i in &sweeps {
+                        let resid = |f: f32| {
+                            let mut h = hz.clone();
+                            h[i] = f;
+                            fit_eq(d, &shapes(&h)).2
+                        };
+                        // 두 스윕이 같은 주파수에서 게인을 반씩 나누면 둘 다 ✓가 되므로 1옥타브 이상 떨어뜨립니다.
+                        let best = cands(sweep(ctl[i]).expect("sweep"))
+                            .into_iter()
+                            .filter(|&f| sweeps.iter().all(|&j| j == i || (f / hz[j]).log2().abs() >= 1.0))
+                            .map(|f| (f, resid(f)))
+                            .min_by(|a, b| a.1.total_cmp(&b.1));
+                        if let Some((f, r)) = best
+                            && (self.freq[i].is_none() || r < 0.8 * resid(hz[i]))
+                        {
+                            hz[i] = f;
+                        }
                     }
                 }
             }
+            hz
+        };
+
+        // 저역컷은 반영 전 d로 판단하고(분석은 꺼짐에서 시작하므로 켜기만), 켜기면 그 스위치 응답을 d에 반영해
+        // 같은 저역 차이를 LOW가 또 쫓지 않게 합니다.
+        let cut = ctl.iter().find_map(|&c| match c {
+            Control::LowCut { hz } => Some(hz),
+            _ => None,
+        });
+        let with_cut = |d: &[f32; 25], fc: f32| -> [f32; 25] { std::array::from_fn(|b| d[b] + hpf_db(fc, BANDS_HZ[b])) };
+        let switch = match (restore, cut) {
+            // 복구: 스위치 응답을 넣은 맞춤과 뺀 맞춤 중 63 Hz–12.5 kHz에서 더 잘 맞는 쪽. 75·80 Hz 스위치는
+            // 63·80 Hz와 125·160 Hz의 차이가 3 dB 남짓이라 그 평균 비교로는 잡음이나 저중역 컷에 묻힙니다.
+            (Some(_), Some(fc)) => {
+                let cost = |d: &[f32; 25]| {
+                    let (g, _, r) = fit_eq_in(d, &shapes(&pick(d)), 0..=*FIT_BANDS.end(), SWITCH_LAMBDA);
+                    r + SWITCH_LAMBDA * g.iter().map(|g| g * g).sum::<f32>()
+                };
+                cost(&with_cut(&d, fc)) < cost(&d)
+            }
+            // 보통: c0(250 Hz–4 kHz)보다 63·80 Hz가 3 dB 넘게 많으면.
+            _ => {
+                let mean = |r: std::ops::RangeInclusive<usize>| d[r.clone()].iter().sum::<f32>() / r.count() as f32;
+                mean(0..=1) - mean(6..=18) > 3.0
+            }
+        };
+        if let (true, Some(fc)) = (switch, cut) {
+            d = with_cut(&d, fc);
         }
+        let hz = pick(&d);
         for &i in &sweeps {
             self.freq[i] = Some(hz[i]);
         }
@@ -333,7 +354,7 @@ impl AdviceEngine {
             // 보통 모드에서 켜기 권장이면 LOW 부스트 없음: 맞춤 범위(100 Hz~) 밖 63·80 Hz는 아직 넘치는데
             // 스위치가 100–160 Hz에서 깎은 만큼을 LOW가 되채우면 같은 저역을 둘이 반대로 쫓습니다.
             let max = if restore.is_none() && matches!(ctl[i], Control::LowShelf { .. }) {
-                if switch > 0.0 { 0.0 } else { LOW_BOOST_MAX_DB }
+                if switch { 0.0 } else { LOW_BOOST_MAX_DB }
             } else if restore.is_none() && matches!(ctl[i], Control::HighShelf { .. }) {
                 HIGH_BOOST_MAX_DB
             } else {
@@ -391,7 +412,7 @@ impl AdviceEngine {
                         db,
                     }
                 }
-                Control::LowCut { .. } if switch > 0.0 => Action::SwitchOn,
+                Control::LowCut { .. } if switch => Action::SwitchOn,
                 Control::Comp if comp => Action::Rotate {
                     degrees: 30.0,
                     db: 0.0,
@@ -734,6 +755,20 @@ fn at(k: &[Advice], label: &str) -> Action { k.iter().find(|k| k.label == label)
     assert!((-5.0..=-3.0).contains(&db_of(at(&k, "MID 2"))), "{k:?}");
     assert_eq!(at(&k, "LOW 60Hz"), Action::Ok);
     assert_eq!(at(&k, "저역컷 100Hz"), Action::SwitchOn);
+}
+#[test] fn finds_75hz_low_cut_under_a_low_mid_cut() {
+    // 75 Hz 스위치는 63·80 Hz와 125·160 Hz 차이가 3.3 dB뿐이라 FREQ 200 MID 컷이 125·160 Hz를 내리면 묻혔습니다.
+    let g = group(MixerModel::Mackie1604Vlz4, 0);
+    let flat = ltass_db(Voice::Male);
+    for (bell, db) in [(160.0, -4.0), (200.0, -5.0), (250.0, -6.0)] {
+        let fin = std::array::from_fn(|b| flat[b] + hpf_db(75.0, BANDS_HZ[b]) + db * Shape::Bell(bell).response(BANDS_HZ[b]));
+        let k = knob_positions(&g, &neutral_summary(flat, 10.0), &fin, 10.0);
+        assert_eq!(at(&k, "저역컷 75Hz"), Action::SwitchOn, "{bell} {db}: {k:?}");
+        assert_eq!(at(&k, "LOW 80Hz"), Action::Ok, "{bell} {db}: {k:?}");
+    }
+    // LOW만 깎았으면 스위치가 아닙니다.
+    let fin = std::array::from_fn(|b| flat[b] - 6.0 * Shape::LowShelf(80.0).response(BANDS_HZ[b]));
+    assert_eq!(at(&knob_positions(&g, &neutral_summary(flat, 10.0), &fin, 10.0), "저역컷 75Hz"), Action::Ok);
 }
 #[test] fn flat_saved_right_after_flat_analysis_is_all_ok() {
     let flat = ltass_db(Voice::Male);
