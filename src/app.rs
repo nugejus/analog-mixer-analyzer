@@ -561,9 +561,10 @@ impl eframe::App for App {
                     r.progress() * n as f32
                 );
                 ui.add(egui::ProgressBar::new(r.progress()).text(text));
-                if live.is_some_and(Live::silent) {
-                    ui.colored_label(mocha::RED, advice::NO_INPUT);
-                }
+            }
+            let noted = advice.is_some_and(|a| a.notes.iter().any(|n| n == advice::NO_INPUT));
+            if !noted && live.is_some_and(Live::silent) {
+                ui.colored_label(mocha::RED, advice::NO_INPUT);
             }
             if let Some(a) = advice {
                 ui.strong(summary.map_or("노브 추천".into(), |s| {
