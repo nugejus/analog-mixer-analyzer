@@ -81,14 +81,14 @@ pub fn db(power: f32) -> f32 {
     (10.0 * power.log10()).max(FLOOR_DB)
 }
 
-/// Sum of bin power with centre frequency in [lo_hz, hi_hz).
+/// Bin power in [lo_hz, hi_hz): bin k spans [(k−½)·bw, (k+½)·bw] and counts by the part of it inside.
 pub fn band_db(bin_power: &[f32], sample_rate: f32, lo_hz: f32, hi_hz: f32) -> f32 {
     let bw = sample_rate / FFT_SIZE as f32;
+    let (lo, hi) = (lo_hz / bw, hi_hz / bw);
     let sum: f32 = bin_power
         .iter()
         .enumerate()
-        .filter(|&(k, _)| (lo_hz..hi_hz).contains(&(k as f32 * bw)))
-        .map(|(_, p)| p)
+        .map(|(k, p)| p * (hi.min(k as f32 + 0.5) - lo.max(k as f32 - 0.5)).max(0.0))
         .sum();
     db(sum)
 }
@@ -116,7 +116,9 @@ pub fn display_freqs(per_oct: usize) -> Vec<f32> {
 
 /// `smooth_n` > 0 averages each point over ±1/(2N) octave (cos² weights, power domain)
 /// and scales by the point's band bin count; 0 keeps the plain whole-bin sum.
+/// N is capped at `per_oct / 2` so the window reaches the next point and no tone falls between points.
 pub fn display_db(bin_power: &[f32], sample_rate: f32, per_oct: usize, smooth_n: usize) -> Vec<f32> {
+    let smooth_n = smooth_n.min(per_oct / 2);
     let half = 2f32.powf(0.5 / per_oct as f32);
     let bw = sample_rate / FFT_SIZE as f32;
     let last = bin_power.len() - 1;
@@ -222,6 +224,17 @@ mod tests {
     }
 
     #[test]
+    fn narrow_smoothing_keeps_tone_between_points() {
+        let sr = 48_000.0;
+        let read = |hz: f32| {
+            let f = Spectrum::new(sr).push(&sine(sr, hz, 0.5, 1.0)).pop().unwrap();
+            display_db(&f.bin_power, sr, 12, 24).into_iter().fold(FLOOR_DB, f32::max)
+        };
+        let (on, between) = (read(20.0 * 2f32.powf(68.0 / 12.0)), read(20.0 * 2f32.powf(68.5 / 12.0)));
+        assert!((on - between).abs() < 3.0, "on a point {on}, between {between}");
+    }
+
+    #[test]
     fn smoothing_removes_low_steps() {
         let sr = 48_000.0;
         let rising: Vec<f32> = (0..=FFT_SIZE / 2).map(|k| 1e-6 * (1.0 + k as f32)).collect();
@@ -278,6 +291,18 @@ mod tests {
                 got - want
             );
             assert!((got - want).abs() < 1.5, "{hz}: {got} vs {want}");
+        }
+    }
+    #[test]
+    fn flat_bands_follow_band_width() {
+        let edge = 2f32.powf(1.0 / 6.0);
+        for sr in [44_100.0f32, 48_000.0, 96_000.0] {
+            let bw = sr / FFT_SIZE as f32;
+            let flat = vec![1.0f32; FFT_SIZE / 2 + 1];
+            for (fc, b) in BANDS_HZ.iter().zip(third_octave_db(&flat, sr)) {
+                let want = 10.0 * (fc * (edge - 1.0 / edge) / bw).log10();
+                assert!((b - want).abs() < 0.01, "sr {sr} {fc} Hz: {b} vs {want}");
+            }
         }
     }
     #[test]

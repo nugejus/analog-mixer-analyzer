@@ -30,9 +30,10 @@ pub fn is_newer(latest: &str, current: &str) -> bool {
     matches!((nums(latest), nums(current)), (Some(a), Some(b)) if a > b)
 }
 
+/// https only, redirects too.
 fn curl() -> Command {
     let mut c = Command::new("curl");
-    c.arg("-fsSL");
+    c.args(["-fsSL", "--proto", "=https", "--proto-redir", "=https"]);
     #[cfg(windows)]
     std::os::windows::process::CommandExt::creation_flags(&mut c, 0x0800_0000); // CREATE_NO_WINDOW
     c

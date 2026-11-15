@@ -99,16 +99,32 @@ fn preset_goal(i: usize, voice: Voice, group: &ChannelGroup) -> Goal {
     Goal { db, notes, restore_dr: None }
 }
 
+/// kHz to one decimal without a trailing .0: 48000 → "48", 44100 → "44.1".
+fn khz(hz: f32) -> String {
+    ((hz / 100.0).round() / 10.0).to_string()
+}
+
 /// Restore mode: aim at the saved bands and compare DR with the saved one.
-fn saved_goal(s: &Saved, mixer: &str, group: &str) -> Goal {
-    let notes = if s.mixer == mixer && s.group == group {
-        vec![]
-    } else {
-        vec![format!(
+/// `sample_rate` is the current analysis rate (`None` before the first analysis).
+fn saved_goal(s: &Saved, mixer: &str, group: &str, sample_rate: Option<f32>) -> Goal {
+    let mut notes = vec![];
+    // 0.3.1의 ProFX22v3 `CH15-18 (스테레오 마이크)`는 지금 `CH15-20`입니다.
+    let same_group = s.group == group || (s.group.as_str(), group) == ("CH15-18 (스테레오 마이크)", "CH15-20 (스테레오 마이크)");
+    if s.mixer != mixer || !same_group {
+        notes.push(format!(
             "저장할 때와 믹서/채널이 다릅니다(저장: {} {}). 같은 채널에서 분석해야 맞습니다.",
             s.mixer, s.group
-        )]
-    };
+        ));
+    }
+    match (s.sample_rate, sample_rate) {
+        (None, _) => notes.push("이 소리는 이전 버전에서 저장해 저음 쪽 값이 조금 다릅니다. 같은 마이크·채널로 다시 저장해 주세요.".into()),
+        (Some(was), Some(now)) if was != now.round() as u32 => notes.push(format!(
+            "저장할 때와 샘플레이트가 다릅니다(저장 {}kHz, 지금 {}kHz). 같은 입력장치 설정에서 분석해야 정확합니다.",
+            khz(was as f32),
+            khz(now)
+        )),
+        _ => {}
+    }
     Goal { db: s.bands_db, notes, restore_dr: Some(s.dynamic_range_db) }
 }
 
@@ -128,11 +144,16 @@ fn repick(pick: Pick, old: &[Saved], new: &[Saved]) -> Pick {
 }
 
 /// `읽기`: a gone folder (USB pulled) is an error, not an empty list, so its file is not replaced once it is back.
-fn read_list(dir: &Path) -> std::io::Result<Vec<Saved>> {
+fn read_list(dir: &Path) -> std::io::Result<(Vec<Saved>, Option<usize>)> {
     if !dir.is_dir() {
         return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "저장 폴더를 찾을 수 없습니다"));
     }
     saved::load(&dir.join(saved::FILE))
+}
+
+/// A `saved.tsv` line that did not parse: the rest is used but the file is not written until 읽기/쓰기.
+fn bad_line(n: usize) -> String {
+    format!("saved.tsv의 {n}번째 줄을 읽지 못했습니다. 파일을 고치거나 [읽기]/[쓰기]로 다른 파일을 고르기 전에는 저장·삭제하지 않습니다.")
 }
 
 /// Writes `list` to `dir/saved.tsv`, unless there is no folder or its file could not be read.
@@ -148,8 +169,19 @@ fn mixer_name(p: &MixerProfile) -> String {
     format!("{} {}", p.brand, p.name)
 }
 
+/// Below this the 16 kHz band is not measured: no knob turns and no saving.
+const MIN_RATE: f32 = 40_000.0;
+
 /// A fresh engine each time, so every knob starts from ✓ (no deadband state carried over).
+/// Below 40 kHz the 16 kHz band is not measured: knob names and one note only (the graph stays).
 fn advise(a: &Analysis, group: &ChannelGroup, goal: &Goal) -> AdviceSet {
+    if a.sample_rate < MIN_RATE {
+        let note = format!(
+            "입력 샘플레이트가 {}kHz라 16kHz 대역까지 잴 수 없습니다. 믹서 USB 입력(44.1kHz 이상)을 고르세요.",
+            khz(a.sample_rate)
+        );
+        return AdviceSet { knobs: advice::labels(group), notes: vec![note], level_offset_db: 0.0 };
+    }
     let mut s = AdviceEngine::new().advise(
         group,
         &Inputs {
@@ -307,7 +339,13 @@ impl App {
         };
         // An existing file we cannot read must not be replaced by a shorter list: blocked until 읽기/쓰기.
         let (saved, write_blocked) = match dir.as_deref().map(|d| saved::load(&d.join(saved::FILE))).transpose() {
-            Ok(l) => (l.unwrap_or_default(), false),
+            Ok(l) => {
+                let (l, bad) = l.unwrap_or_default();
+                if let Some(n) = bad {
+                    save_error = Some(bad_line(n));
+                }
+                (l, bad.is_some())
+            }
             Err(e) => {
                 save_error = Some(format!("읽지 못했습니다: {e}"));
                 (vec![], true)
@@ -350,27 +388,35 @@ impl App {
         let group = &self.profile.groups[self.group];
         self.goal = match self.pick {
             Pick::Preset(i) => preset_goal(i, self.voice, group),
-            Pick::Saved(i) => saved_goal(&self.saved[i], &mixer_name(&self.profile), group.label),
+            Pick::Saved(i) => {
+                saved_goal(&self.saved[i], &mixer_name(&self.profile), group.label, self.analysis.as_ref().map(|a| a.sample_rate))
+            }
         };
         self.advice = self.analysis.as_ref().map(|a| advise(a, group, &self.goal));
     }
 
     /// Writes the saved list; a failure shows in red under 안내 and the list stays in memory.
     fn persist(&mut self) {
+        // 막힌 이유(줄 번호, 읽기 실패)가 떠 있으면 그대로 둡니다.
+        let reason = |e: &str| e.starts_with("saved.tsv의") || e.starts_with("읽지 못했습니다");
+        if self.write_blocked && self.save_error.as_deref().is_some_and(reason) {
+            return;
+        }
         let r = write_list(self.dir.as_deref(), self.write_blocked, &self.saved);
         self.save_error = r.err().map(|e| format!("저장하지 못했습니다: {e}"));
     }
 
     /// A new list (읽기, another folder) keeps the picked saved sound by name.
     /// A read of the save folder: on failure the list stays and that folder is not written until 읽기/쓰기.
-    fn take_list(&mut self, r: std::io::Result<Vec<Saved>>) {
-        self.write_blocked = r.is_err();
+    /// A line it could not parse also blocks writing; the parsed sounds are used.
+    fn take_list(&mut self, r: std::io::Result<(Vec<Saved>, Option<usize>)>) {
+        self.write_blocked = !matches!(r, Ok((_, None)));
         self.save_error = match r {
-            Ok(l) => {
+            Ok((l, bad)) => {
                 self.pick = repick(self.pick, &self.saved, &l);
                 self.saved = l;
                 self.readvise();
-                None
+                bad.map(bad_line)
             }
             Err(e) => Some(format!("읽지 못했습니다: {e}")),
         };
@@ -449,7 +495,7 @@ impl App {
                 }
             }
         }
-        let summary = self.analysis.as_ref().and_then(|a| a.summary.as_ref());
+        let summary = self.analysis.as_ref().filter(|a| a.sample_rate >= MIN_RATE).and_then(|a| a.summary.as_ref());
         let Some(name) = &mut self.naming else {
             if ui.add_enabled(summary.is_some(), egui::Button::new("이 소리 저장")).clicked() {
                 self.naming = Some(String::new());
@@ -469,6 +515,7 @@ impl App {
                 group: self.profile.groups[self.group].label.to_owned(),
                 dynamic_range_db: s.dynamic_range_db,
                 bands_db: s.bands_db,
+                sample_rate: self.analysis.as_ref().map(|a| a.sample_rate.round() as u32),
             };
             saved::upsert(&mut self.saved, s);
             self.persist();
@@ -1420,6 +1467,14 @@ mod tests {
         assert_eq!(knobs(MixerModel::YamahaMg06x), 4);
     }
 
+    #[test] fn low_sample_rate_gives_names_and_one_note() {
+        let g = &MixerFactory::create(MixerModel::MackieProFx12v3).groups[0];
+        let goal = preset_goal(2, Voice::Male, g); // 300Hz 노트가 있는 목표
+        assert!(!goal.notes.is_empty());
+        let s = advise(&Analysis { sample_rate: 24_000.0, ..natural(|_| 6.0) }, g, &goal);
+        assert!(s.knobs.iter().all(|k| k.action == Action::Wait), "{:?}", s.knobs);
+        assert_eq!(s.notes, ["입력 샘플레이트가 24kHz라 16kHz 대역까지 잴 수 없습니다. 믹서 USB 입력(44.1kHz 이상)을 고르세요."]);
+    }
     #[test] fn presets_do_not_chase_switch_with_low() {
         let g = &MixerFactory::create(MixerModel::MackieProFx22v3).groups[0];
         for i in 1..PRESETS.len() {
@@ -1449,23 +1504,37 @@ mod tests {
     }
 
     #[test] fn saved_goal_flags_other_channel() {
-        let s = Saved { name: "x".into(), mixer: "Mackie ProFX22v3 (2019, LEVEL SET LED)".into(), group: "CH1-12 (COMP)".into(), dynamic_range_db: 9.0, bands_db: [0.0; 25] };
-        let same = saved_goal(&s, &s.mixer, &s.group);
+        let s = Saved { name: "x".into(), mixer: "Mackie ProFX22v3 (2019, LEVEL SET LED)".into(), group: "CH1-12 (COMP)".into(), dynamic_range_db: 9.0, bands_db: [0.0; 25], sample_rate: Some(48_000) };
+        let same = saved_goal(&s, &s.mixer, &s.group, Some(48_000.0));
         assert!(same.notes.is_empty() && same.restore_dr == Some(9.0) && same.db == s.bands_db);
-        let other = saved_goal(&s, &s.mixer, "CH13-14");
+        let other = saved_goal(&s, &s.mixer, "CH13-14", Some(48_000.0));
         assert_eq!(other.notes, ["저장할 때와 믹서/채널이 다릅니다(저장: Mackie ProFX22v3 (2019, LEVEL SET LED) CH1-12 (COMP)). 같은 채널에서 분석해야 맞습니다."]);
+    }
+    #[test] fn saved_goal_flags_sample_rate() {
+        let s = saved_sample("x");
+        assert_eq!(saved_goal(&s, "m", "g", Some(44_100.0)).notes,
+                   ["저장할 때와 샘플레이트가 다릅니다(저장 48kHz, 지금 44.1kHz). 같은 입력장치 설정에서 분석해야 정확합니다."]);
+        let old = Saved { sample_rate: None, ..s };
+        assert_eq!(saved_goal(&old, "m", "g", Some(48_000.0)).notes,
+                   ["이 소리는 이전 버전에서 저장해 저음 쪽 값이 조금 다릅니다. 같은 마이크·채널로 다시 저장해 주세요."]);
+        assert_eq!([khz(96_000.0), khz(22_050.0)], ["96", "22.1"]);
+    }
+    #[test] fn old_profx22v3_stereo_label_is_the_same_group() {
+        let s = Saved { group: "CH15-18 (스테레오 마이크)".into(), ..saved_sample("x") };
+        assert!(saved_goal(&s, &s.mixer.clone(), "CH15-20 (스테레오 마이크)", Some(48_000.0)).notes.is_empty());
+        assert_eq!(saved_goal(&s, "Mackie ProFX22 (1세대, 2011)", "CH15-20 (스테레오 마이크)", Some(48_000.0)).notes.len(), 1);
     }
     #[test] fn restore_from_saved_says_switch_off() {
         let g = &MixerFactory::create(MixerModel::MackieProFx22v3).groups[0];
         let saved_now = natural(|_| 0.0); // 저장 때: 스위치 꺼짐
         let s = Saved { name: "x".into(), mixer: "m".into(), group: g.label.into(),
-                        dynamic_range_db: 10.0, bands_db: saved_now.summary.as_ref().unwrap().bands_db };
-        let a = advise(&natural(|f| hpf_db(100.0, f)), g, &saved_goal(&s, "m", g.label)); // 지금: 켜짐
+                        dynamic_range_db: 10.0, bands_db: saved_now.summary.as_ref().unwrap().bands_db, sample_rate: Some(48_000) };
+        let a = advise(&natural(|f| hpf_db(100.0, f)), g, &saved_goal(&s, "m", g.label, Some(48_000.0))); // 지금: 켜짐
         assert_eq!(knob(&a, "저역컷 100Hz"), Action::SwitchOff);
     }
 
     fn saved_sample(name: &str) -> Saved {
-        Saved { name: name.into(), mixer: "m".into(), group: "g".into(), dynamic_range_db: 9.0, bands_db: [0.0; 25] }
+        Saved { name: name.into(), mixer: "m".into(), group: "g".into(), dynamic_range_db: 9.0, bands_db: [0.0; 25], sample_rate: Some(48_000) }
     }
     #[test] fn repick_follows_name() {
         let (a, b, c) = (saved_sample("a"), saved_sample("b"), saved_sample("c"));
@@ -1479,7 +1548,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         assert_eq!(read_list(&d).unwrap_err().to_string(), "저장 폴더를 찾을 수 없습니다");
         std::fs::create_dir_all(&d).unwrap();
-        assert_eq!(read_list(&d).unwrap(), []);
+        assert_eq!(read_list(&d).unwrap(), (vec![], None));
         std::fs::remove_dir_all(&d).unwrap();
     }
     #[test] fn blocked_write_keeps_file() {

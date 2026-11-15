@@ -328,6 +328,8 @@ impl AdviceEngine {
                 _ => hz[i],
             };
             let (mut max, mut min) = (max, -EQ_LIMIT_DB);
+            // 첫 구간(80 Hz) 아래 LOW(Signature 60 Hz)도 웅웅거림 구간을 따릅니다.
+            let centre = centre.max(TONE_BANDS[0].1);
             if let Some(t) = TONE_BANDS.iter().position(|&(_, lo, hi)| (lo..hi).contains(&centre)) {
                 if tone[t] >= TONE_HOT_DB {
                     max = max.min(0.0);
@@ -585,11 +587,12 @@ fn with(dev: impl Fn(f32) -> f32) -> [f32; 25] { let t = ltass_db(Voice::Male); 
 fn sum_of(bands: [f32; 25]) -> Summary {
     Summary { bands_db: bands, ..summary(|_| 0.0) }
 }
+/// 화면에서 본 대역 차이(측정 − 목표): 웅웅거림이 빨강, 63–100 Hz는 모자람.
+const SHOT: [f32; 25] = [-2.3, -6.5, -10.5, 1.6, 7.0, 11.4, 1.7, 1.5, 3.4, 1.0, 4.0, 2.8, -1.0, 5.9, 0.6, -3.9, -3.9, -1.1, -3.4, -4.0, -0.5, -2.7, -7.7, -13.0, -16.0];
 #[test] fn screenshot_case_follows_the_bands() {
     let g = group(V3, 0);
     let (t, _) = preset_target(&PRESETS[3], Voice::Male, &g);
-    let d = [-2.3, -6.5, -10.5, 1.6, 7.0, 11.4, 1.7, 1.5, 3.4, 1.0, 4.0, 2.8, -1.0, 5.9, 0.6, -3.9, -3.9, -1.1, -3.4, -4.0, -0.5, -2.7, -7.7, -13.0, -16.0];
-    let s = sum_of(std::array::from_fn(|i| t[i] + d[i] - 20.0));
+    let s = sum_of(std::array::from_fn(|i| t[i] + SHOT[i] - 20.0));
     let a = run_t(&g, &s, t, None);
     assert_eq!(act(&a, "LOW 80Hz"), Action::Ok);
     assert!((db_of(act(&a, "HIGH 12kHz")) - 6.0).abs() < 1e-3);
@@ -598,6 +601,18 @@ fn sum_of(bands: [f32; 25]) -> Summary {
     // 복구 모드에는 LOW 한도가 없지만, 빨간 웅웅거림 구간이라 여기서도 올리지 않습니다.
     let r = run_t(&g, &s, t, Some(s.dynamic_range_db));
     assert!(!matches!(act(&r, "LOW 80Hz"), Action::Rotate { db, .. } if db > 0.0), "{:?}", act(&r, "LOW 80Hz"));
+}
+#[test] fn low_below_the_hum_band_follows_it() {
+    // Signature LOW 60 Hz는 웅웅거림(80–250 Hz) 아래지만 그 구간이 빨가면 올리지 않습니다.
+    let g = group(MixerModel::SoundcraftSignature12, 0);
+    let (t, _) = preset_target(&PRESETS[3], Voice::Male, &g);
+    let s = sum_of(std::array::from_fn(|i| t[i] + SHOT[i] - 20.0));
+    let lvl = level_match_db(&s.bands_db, &t);
+    assert!(tone_excess(&s.bands_db, &std::array::from_fn(|i| t[i] + lvl))[0] >= TONE_HOT_DB);
+    for restore in [None, Some(s.dynamic_range_db)] {
+        let low = act(&run_t(&g, &s, t, restore), "LOW 60Hz");
+        assert!(!matches!(low, Action::Rotate { db, .. } if db > 0.0), "{restore:?}: {low:?}");
+    }
 }
 #[test] fn high_boost_capped_only_in_normal_mode() {
     let g = group(V3, 0);
