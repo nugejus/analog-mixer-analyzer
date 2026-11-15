@@ -10,7 +10,7 @@ use mixer_analyzer::{
     mixers::{ChannelGroup, Control, KNOB_TRAVEL_DEG, MixerFactory, MixerModel, MixerProfile},
     spectrum::{self, DisplayCurve, Frame, HOP, Spectrum},
     speech::{SpeechStats, Summary},
-    target::{BANDS_HZ, Voice, ltass_db},
+    target::{BANDS_HZ, BELL_OCT, PRESETS, Voice, preset_target},
     theme::{self, mocha},
 };
 use std::sync::Arc;
@@ -75,19 +75,37 @@ fn result_db(a: &Analysis, per_oct: usize) -> Option<Vec<f32>> {
     Some(spectrum::display_db(&s.bin_power, a.sample_rate, per_oct))
 }
 
+/// What the advice aims at: a 1/3-octave target, notes about it, and the saved DR in restore mode.
+struct Goal {
+    db: [f32; 25],
+    notes: Vec<String>,
+    restore_dr: Option<f32>,
+}
+
+fn preset_goal(i: usize, voice: Voice, group: &ChannelGroup) -> Goal {
+    let (db, dropped) = preset_target(&PRESETS[i], voice, group);
+    let notes = dropped
+        .into_iter()
+        .map(|hz| format!("이 채널에는 {} 부근을 바꿀 노브가 없어 그 부분은 빼고 맞춥니다.", fmt_hz(hz)))
+        .collect();
+    Goal { db, notes, restore_dr: None }
+}
+
 /// A fresh engine each time, so every knob starts from ✓ (no deadband state carried over).
-fn advise(a: &Analysis, group: &ChannelGroup, voice: Voice) -> AdviceSet {
-    AdviceEngine::new().advise(
+fn advise(a: &Analysis, group: &ChannelGroup, goal: &Goal) -> AdviceSet {
+    let mut s = AdviceEngine::new().advise(
         group,
         &Inputs {
             summary: a.summary.as_ref(),
-            target: &ltass_db(voice),
+            target: &goal.db,
             clipped_recently: a.clipped,
             feedback_hz: a.howl,
             silent: a.silent,
-            restore_dynamic_range_db: None,
+            restore_dynamic_range_db: goal.restore_dr,
         },
-    )
+    );
+    s.notes.extend(goal.notes.iter().cloned());
+    s
 }
 
 /// An open input and the analysis state built for its sample rate and channel count.
@@ -171,6 +189,10 @@ pub struct App {
     profile: MixerProfile,
     group: usize,
     voice: Voice,
+    /// Index into `PRESETS`.
+    preset: usize,
+    /// Rebuilt by `readvise` from preset, voice and channel group.
+    goal: Goal,
     rec_seconds: u32,
     /// Index into `SMOOTHING`.
     smooth: usize,
@@ -190,15 +212,18 @@ impl App {
             audio::default_device_name().unwrap_or_default()
         };
         let model = MixerModel::MackieProFx22v3;
+        let profile = MixerFactory::create(model);
         Self {
             devices: audio::device_names(),
             live: open(&device, RESOLUTIONS[2].1),
             device,
             channel: 0,
             model,
-            profile: MixerFactory::create(model),
+            goal: preset_goal(0, Voice::Male, &profile.groups[0]),
+            profile,
             group: 0,
             voice: Voice::Male,
+            preset: 0,
             rec_seconds: 20,
             smooth: 1,
             res: 2,
@@ -210,7 +235,8 @@ impl App {
 
     fn readvise(&mut self) {
         let group = &self.profile.groups[self.group];
-        self.advice = self.analysis.as_ref().map(|a| advise(a, group, self.voice));
+        self.goal = preset_goal(self.preset, self.voice, group);
+        self.advice = self.analysis.as_ref().map(|a| advise(a, group, &self.goal));
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
@@ -272,10 +298,22 @@ impl App {
             live.rec = None;
         }
         ui.label("목표");
-        let voice = self.voice;
+        let (voice, preset) = (self.voice, self.preset);
+        let p = &PRESETS[self.preset];
+        egui::ComboBox::from_id_salt("goal")
+            .selected_text(format!("{} · {}", p.category, p.name))
+            .show_ui(ui, |ui| {
+                for (i, p) in PRESETS.iter().enumerate() {
+                    if i == 0 || PRESETS[i - 1].category != p.category {
+                        ui.colored_label(mocha::SUBTEXT0, p.category);
+                    }
+                    ui.selectable_value(&mut self.preset, i, p.name);
+                }
+            });
+        ui.colored_label(mocha::SUBTEXT0, PRESETS[self.preset].when);
         ui.selectable_value(&mut self.voice, Voice::Male, "남성");
         ui.selectable_value(&mut self.voice, Voice::Female, "여성");
-        if self.voice != voice {
+        if (self.voice, self.preset) != (voice, preset) {
             self.readvise();
         }
         let recording = self.live.as_ref().is_ok_and(|l| l.rec.is_some());
@@ -370,9 +408,6 @@ struct Span {
     hi: f32,
     mark: Option<f32>,
 }
-
-/// Half-width in octaves of a Bell (sigma 0.6 octave).
-const BELL_OCT: f32 = 0.7;
 
 fn knob_spans(group: &ChannelGroup, advice: Option<&AdviceSet>) -> Vec<Span> {
     advice::labels(group)
@@ -699,7 +734,7 @@ impl eframe::App for App {
                 let offset = advice.map_or(0.0, |a| a.level_offset_db);
                 let per_oct = RESOLUTIONS[self.res].1;
                 let target = self.analysis.as_ref().filter(|a| a.summary.is_some()).map(|a| {
-                    let mut t = ltass_db(self.voice);
+                    let mut t = self.goal.db;
                     for (v, hz) in t.iter_mut().zip(BANDS_HZ) {
                         *v += offset - spectrum::display_to_band_db(hz, a.sample_rate, per_oct);
                     }
@@ -739,6 +774,7 @@ impl eframe::App for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mixer_analyzer::target::{hpf_db, ltass_db};
 
     fn spans(m: MixerModel, a: Option<&AdviceSet>) -> Vec<(String, f32, f32, Option<f32>)> {
         knob_spans(&MixerFactory::create(m).groups[0], a).into_iter().map(|s| (s.label, s.lo, s.hi, s.mark)).collect()
@@ -914,7 +950,7 @@ mod tests {
             silent: false,
         };
         let g = &MixerFactory::create(MixerModel::MackieProFx22v3).groups[0];
-        let s = advise(&a, g, Voice::Male);
+        let s = advise(&a, g, &preset_goal(0, Voice::Male, g));
         assert!(s.knobs.iter().all(|k| k.action == Action::Wait));
         assert!(s.notes.iter().any(|n| n.contains("말소리가 부족합니다")));
     }
@@ -936,10 +972,11 @@ mod tests {
         assert!((freqs[top] / 1000.0).log2().abs() <= 1.0 / 48.0, "{}", freqs[top]);
     }
 
-    #[test]
-    fn analysis_advice_follows_group() {
+    /// Male LTASS − 40 dB shaped by `dev`, otherwise a clean recording.
+    fn natural(dev: impl Fn(f32) -> f32) -> Analysis {
+        let t = ltass_db(Voice::Male);
         let s = Summary {
-            bands_db: ltass_db(Voice::Male).map(|t| t - 40.0),
+            bands_db: std::array::from_fn(|b| t[b] - 40.0 + dev(BANDS_HZ[b])),
             bin_power: vec![],
             peak_db: -12.0,
             rms_db: -30.0,
@@ -949,20 +986,56 @@ mod tests {
             crest_db: 18.0,
             active_seconds: 10.0,
         };
-        let a = Analysis {
+        Analysis {
             summary: Some(s),
             sample_rate: 48_000.0,
             seconds: 20,
             clipped: false,
             howl: None,
             silent: false,
-        };
+        }
+    }
+
+    fn knob(a: &AdviceSet, l: &str) -> Action {
+        a.knobs.iter().find(|k| k.label == l).unwrap().action.clone()
+    }
+
+    #[test]
+    fn analysis_advice_follows_group() {
+        let a = natural(|_| 0.0);
         let knobs = |m| {
-            advise(&a, &MixerFactory::create(m).groups[0], Voice::Male)
-                .knobs
-                .len()
+            let g = &MixerFactory::create(m).groups[0];
+            advise(&a, g, &preset_goal(0, Voice::Male, g)).knobs.len()
         };
         assert_eq!(knobs(MixerModel::MackieProFx22v3), 7);
         assert_eq!(knobs(MixerModel::YamahaMg06x), 4);
+    }
+
+    #[test] fn presets_do_not_chase_switch_with_low() {
+        let g = &MixerFactory::create(MixerModel::MackieProFx22v3).groups[0];
+        for i in 1..PRESETS.len() {
+            let s = advise(&natural(|_| 0.0), g, &preset_goal(i, Voice::Male, g));
+            assert_eq!(knob(&s, "저역컷 100Hz"), Action::SwitchOn, "{i}");
+            assert_eq!(knob(&s, "LOW 80Hz"), Action::Ok, "{i}");
+        }
+    }
+    #[test] fn preset_on_75hz_switch_settles_when_on() {
+        let g = &MixerFactory::create(MixerModel::Mackie1202Vlz4).groups[0];
+        let s = advise(&natural(|f| hpf_db(75.0, f)), g, &preset_goal(1, Voice::Male, g));
+        assert_eq!(knob(&s, "저역컷 75Hz"), Action::Ok);
+        assert_eq!(knob(&s, "LOW 80Hz"), Action::Ok);
+    }
+    #[test] fn light_leader_on_fixed_mid_does_not_brighten() {
+        let g = &MixerFactory::create(MixerModel::MackieProFx12v3).groups[0];
+        let s = advise(&natural(|_| 0.0), g, &preset_goal(2, Voice::Male, g));
+        match knob(&s, "HIGH 12kHz") { Action::Ok => {}, Action::Rotate { db, .. } => assert!(db <= 4.0, "{db}"), x => panic!("{x:?}") }
+        assert!(s.notes.iter().any(|n| n == "이 채널에는 300Hz 부근을 바꿀 노브가 없어 그 부분은 빼고 맞춥니다."));
+    }
+    #[test] fn every_preset_on_every_group_is_finite() {
+        for m in MixerModel::ALL { for g in &MixerFactory::create(m).groups { for i in 0..PRESETS.len() {
+            for k in advise(&natural(|_| 0.0), g, &preset_goal(i, Voice::Female, g)).knobs {
+                if let Action::Rotate { degrees, db } = k.action { assert!(degrees.is_finite() && db.is_finite()); }
+            }
+        }}}
     }
 }
