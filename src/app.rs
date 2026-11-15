@@ -8,6 +8,7 @@ use mixer_analyzer::{
     feedback::FeedbackDetector,
     levels::{HistPoint, LevelMeter},
     mixers::{ChannelGroup, Control, KNOB_TRAVEL_DEG, MixerFactory, MixerModel, MixerProfile},
+    saved::{self, Saved},
     spectrum::{self, DisplayCurve, Frame, HOP, Spectrum},
     speech::{SpeechStats, Summary},
     target::{BANDS_HZ, BELL_OCT, PRESETS, Voice, preset_target},
@@ -89,6 +90,30 @@ fn preset_goal(i: usize, voice: Voice, group: &ChannelGroup) -> Goal {
         .map(|hz| format!("이 채널에는 {} 부근을 바꿀 노브가 없어 그 부분은 빼고 맞춥니다.", fmt_hz(hz)))
         .collect();
     Goal { db, notes, restore_dr: None }
+}
+
+/// Restore mode: aim at the saved bands and compare DR with the saved one.
+fn saved_goal(s: &Saved, mixer: &str, group: &str) -> Goal {
+    let notes = if s.mixer == mixer && s.group == group {
+        vec![]
+    } else {
+        vec![format!(
+            "저장할 때와 믹서/채널이 다릅니다(저장: {} {}). 같은 채널에서 분석해야 맞습니다.",
+            s.mixer, s.group
+        )]
+    };
+    Goal { db: s.bands_db, notes, restore_dr: Some(s.dynamic_range_db) }
+}
+
+/// The `목표` choice: a preset or a saved sound.
+#[derive(Clone, Copy, PartialEq)]
+enum Pick {
+    Preset(usize),
+    Saved(usize),
+}
+
+fn mixer_name(p: &MixerProfile) -> String {
+    format!("{} {}", p.brand, p.name)
 }
 
 /// A fresh engine each time, so every knob starts from ✓ (no deadband state carried over).
@@ -189,10 +214,17 @@ pub struct App {
     profile: MixerProfile,
     group: usize,
     voice: Voice,
-    /// Index into `PRESETS`.
-    preset: usize,
-    /// Rebuilt by `readvise` from preset, voice and channel group.
+    pick: Pick,
+    /// Rebuilt by `readvise` from pick, voice and channel group.
     goal: Goal,
+    /// `None` when no data folder was found.
+    saved_path: Option<std::path::PathBuf>,
+    saved: Vec<Saved>,
+    /// Name being typed after `이 소리 저장`.
+    naming: Option<String>,
+    /// `삭제` was pressed once and now reads `정말 삭제`.
+    confirm_delete: bool,
+    save_error: Option<String>,
     rec_seconds: u32,
     /// Index into `SMOOTHING`.
     smooth: usize,
@@ -213,7 +245,13 @@ impl App {
         };
         let model = MixerModel::MackieProFx22v3;
         let profile = MixerFactory::create(model);
+        let saved_path = saved::default_path();
         Self {
+            saved: saved_path.as_deref().map(saved::load).unwrap_or_default(),
+            saved_path,
+            naming: None,
+            confirm_delete: false,
+            save_error: None,
             devices: audio::device_names(),
             live: open(&device, RESOLUTIONS[2].1),
             device,
@@ -223,7 +261,7 @@ impl App {
             profile,
             group: 0,
             voice: Voice::Male,
-            preset: 0,
+            pick: Pick::Preset(0),
             rec_seconds: 20,
             smooth: 1,
             res: 2,
@@ -235,19 +273,73 @@ impl App {
 
     fn readvise(&mut self) {
         let group = &self.profile.groups[self.group];
-        self.goal = preset_goal(self.preset, self.voice, group);
+        self.goal = match self.pick {
+            Pick::Preset(i) => preset_goal(i, self.voice, group),
+            Pick::Saved(i) => saved_goal(&self.saved[i], &mixer_name(&self.profile), group.label),
+        };
         self.advice = self.analysis.as_ref().map(|a| advise(a, group, &self.goal));
     }
 
+    /// Writes the saved list; a failure shows in red under 안내 and the list stays in memory.
+    fn persist(&mut self) {
+        let r = match &self.saved_path {
+            Some(p) => saved::store(p, &self.saved).map_err(|e| e.to_string()),
+            None => Err("저장 폴더를 찾을 수 없습니다".to_owned()),
+        };
+        self.save_error = r.err().map(|e| format!("저장하지 못했습니다: {e}"));
+    }
+
+    /// `삭제`/`정말 삭제` for a picked saved sound, then `이 소리 저장` or the name field.
+    fn save_controls(&mut self, ui: &mut egui::Ui) {
+        if let Pick::Saved(i) = self.pick {
+            let label = if self.confirm_delete { "정말 삭제" } else { "삭제" };
+            if ui.button(label).clicked() {
+                if self.confirm_delete {
+                    self.saved.remove(i);
+                    self.persist();
+                    (self.pick, self.confirm_delete) = (Pick::Preset(0), false);
+                    self.readvise();
+                } else {
+                    self.confirm_delete = true;
+                }
+            }
+        }
+        let summary = self.analysis.as_ref().and_then(|a| a.summary.as_ref());
+        let Some(name) = &mut self.naming else {
+            if ui.add_enabled(summary.is_some(), egui::Button::new("이 소리 저장")).clicked() {
+                self.naming = Some(String::new());
+            }
+            return;
+        };
+        ui.add(egui::TextEdit::singleline(name).hint_text("홍길동 목사님 설교 마이크").desired_width(180.0));
+        let name = saved::clean(name);
+        let save = ui.add_enabled(!name.is_empty() && summary.is_some(), egui::Button::new("저장")).clicked();
+        if ui.button("취소").clicked() {
+            self.naming = None;
+        }
+        if let (true, Some(s)) = (save, summary) {
+            let s = Saved {
+                name,
+                mixer: mixer_name(&self.profile),
+                group: self.profile.groups[self.group].label.to_owned(),
+                dynamic_range_db: s.dynamic_range_db,
+                bands_db: s.bands_db,
+            };
+            saved::upsert(&mut self.saved, s);
+            self.persist();
+            self.naming = None;
+            self.readvise();
+        }
+    }
+
     fn top_bar(&mut self, ui: &mut egui::Ui) {
-        let name = |p: &MixerProfile| format!("{} {}", p.brand, p.name);
         ui.label("믹서");
         let mut model = self.model;
         egui::ComboBox::from_id_salt("mixer")
-            .selected_text(name(&self.profile))
+            .selected_text(mixer_name(&self.profile))
             .show_ui(ui, |ui| {
                 for m in MixerModel::ALL {
-                    ui.selectable_value(&mut model, m, name(&MixerFactory::create(m)));
+                    ui.selectable_value(&mut model, m, mixer_name(&MixerFactory::create(m)));
                 }
             });
         if model != self.model {
@@ -298,24 +390,46 @@ impl App {
             live.rec = None;
         }
         ui.label("목표");
-        let (voice, preset) = (self.voice, self.preset);
-        let p = &PRESETS[self.preset];
+        let (voice, pick) = (self.voice, self.pick);
+        let title = |pick| match pick {
+            Pick::Preset(i) => format!("{} · {}", PRESETS[i].category, PRESETS[i].name),
+            Pick::Saved(i) => format!("저장한 세팅 · {}", self.saved[i].name),
+        };
         egui::ComboBox::from_id_salt("goal")
-            .selected_text(format!("{} · {}", p.category, p.name))
+            .selected_text(title(pick))
             .show_ui(ui, |ui| {
                 for (i, p) in PRESETS.iter().enumerate() {
                     if i == 0 || PRESETS[i - 1].category != p.category {
                         ui.colored_label(mocha::SUBTEXT0, p.category);
                     }
-                    ui.selectable_value(&mut self.preset, i, p.name);
+                    ui.selectable_value(&mut self.pick, Pick::Preset(i), p.name);
+                }
+                if !self.saved.is_empty() {
+                    ui.colored_label(mocha::SUBTEXT0, "저장한 세팅");
+                }
+                for (i, s) in self.saved.iter().enumerate() {
+                    ui.selectable_value(&mut self.pick, Pick::Saved(i), &s.name);
                 }
             });
-        ui.colored_label(mocha::SUBTEXT0, PRESETS[self.preset].when);
-        ui.selectable_value(&mut self.voice, Voice::Male, "남성");
-        ui.selectable_value(&mut self.voice, Voice::Female, "여성");
-        if (self.voice, self.preset) != (voice, preset) {
+        let when = match self.pick {
+            Pick::Preset(i) => PRESETS[i].when.to_owned(),
+            Pick::Saved(i) => {
+                let s = &self.saved[i];
+                format!("저장: {} {} — 저장할 때와 같은 사람·같은 마이크로 분석하세요.", s.mixer, s.group)
+            }
+        };
+        ui.colored_label(mocha::SUBTEXT0, when);
+        ui.add_enabled_ui(matches!(self.pick, Pick::Preset(_)), |ui| {
+            ui.selectable_value(&mut self.voice, Voice::Male, "남성");
+            ui.selectable_value(&mut self.voice, Voice::Female, "여성");
+        });
+        if self.pick != pick {
+            self.confirm_delete = false;
+        }
+        if (self.voice, self.pick) != (voice, pick) {
             self.readvise();
         }
+        self.save_controls(ui);
         let recording = self.live.as_ref().is_ok_and(|l| l.rec.is_some());
         ui.label("녹음");
         ui.add_enabled(
@@ -727,6 +841,9 @@ impl eframe::App for App {
             for n in advice.iter().flat_map(|a| &a.notes) {
                 ui.label(n);
             }
+            if let Some(e) = &self.save_error {
+                ui.colored_label(mocha::RED, e);
+            }
             ui.colored_label(mocha::SUBTEXT0, self.profile.pc_tip);
         });
         egui::CentralPanel::default().show(ui, |ui| match &self.live {
@@ -1037,5 +1154,21 @@ mod tests {
                 if let Action::Rotate { degrees, db } = k.action { assert!(degrees.is_finite() && db.is_finite()); }
             }
         }}}
+    }
+
+    #[test] fn saved_goal_flags_other_channel() {
+        let s = Saved { name: "x".into(), mixer: "Mackie ProFX22v3 (2019, LEVEL SET LED)".into(), group: "CH1-12 (COMP)".into(), dynamic_range_db: 9.0, bands_db: [0.0; 25] };
+        let same = saved_goal(&s, &s.mixer, &s.group);
+        assert!(same.notes.is_empty() && same.restore_dr == Some(9.0) && same.db == s.bands_db);
+        let other = saved_goal(&s, &s.mixer, "CH13-14");
+        assert_eq!(other.notes, ["저장할 때와 믹서/채널이 다릅니다(저장: Mackie ProFX22v3 (2019, LEVEL SET LED) CH1-12 (COMP)). 같은 채널에서 분석해야 맞습니다."]);
+    }
+    #[test] fn restore_from_saved_says_switch_off() {
+        let g = &MixerFactory::create(MixerModel::MackieProFx22v3).groups[0];
+        let saved_now = natural(|_| 0.0); // 저장 때: 스위치 꺼짐
+        let s = Saved { name: "x".into(), mixer: "m".into(), group: g.label.into(),
+                        dynamic_range_db: 10.0, bands_db: saved_now.summary.as_ref().unwrap().bands_db };
+        let a = advise(&natural(|f| hpf_db(100.0, f)), g, &saved_goal(&s, "m", g.label)); // 지금: 켜짐
+        assert_eq!(knob(&a, "저역컷 100Hz"), Action::SwitchOff);
     }
 }
