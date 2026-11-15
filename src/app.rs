@@ -14,6 +14,7 @@ use mixer_analyzer::{
     target::{BANDS_HZ, BELL_OCT, PRESETS, Voice, preset_target},
     theme::{self, mocha},
 };
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -108,10 +109,27 @@ fn saved_goal(s: &Saved, mixer: &str, group: &str) -> Goal {
 }
 
 /// The `목표` choice: a preset or a saved sound.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Pick {
     Preset(usize),
     Saved(usize),
+}
+
+/// The same pick in a new list: a saved sound is found again by name, else the first preset.
+fn repick(pick: Pick, old: &[Saved], new: &[Saved]) -> Pick {
+    match pick {
+        Pick::Saved(i) => new.iter().position(|s| s.name == old[i].name).map_or(Pick::Preset(0), Pick::Saved),
+        p => p,
+    }
+}
+
+/// Writes `list` to `dir/saved.tsv`, unless there is no folder or its file could not be read.
+fn write_list(dir: Option<&Path>, blocked: bool, list: &[Saved]) -> Result<(), String> {
+    let dir = dir.ok_or("저장 폴더를 찾을 수 없습니다")?;
+    if blocked {
+        return Err("읽지 못한 파일은 덮어쓰지 않습니다. [읽기]나 [쓰기]를 누르세요.".to_owned());
+    }
+    saved::store(&dir.join(saved::FILE), list).map_err(|e| e.to_string())
 }
 
 fn mixer_name(p: &MixerProfile) -> String {
@@ -219,8 +237,12 @@ pub struct App {
     pick: Pick,
     /// Rebuilt by `readvise` from pick, voice and channel group.
     goal: Goal,
-    /// `None` when no data folder was found.
-    saved_path: Option<std::path::PathBuf>,
+    /// Holds `folder.txt`; `None` when HOME/APPDATA is missing.
+    default_dir: Option<PathBuf>,
+    /// The save folder holding `saved.tsv`; `None` until one is known.
+    dir: Option<PathBuf>,
+    /// Its `saved.tsv` could not be read, so only `쓰기` may overwrite it.
+    write_blocked: bool,
     saved: Vec<Saved>,
     /// Name being typed after `이 소리 저장`.
     naming: Option<String>,
@@ -247,18 +269,30 @@ impl App {
         };
         let model = MixerModel::MackieProFx22v3;
         let profile = MixerFactory::create(model);
-        let mut saved_path = saved::default_dir().map(|d| d.join(saved::FILE));
-        // An existing file we cannot read must not be replaced by a shorter list: no path = persist refuses.
-        let (saved, save_error) = match saved_path.as_deref().map(saved::load).transpose() {
-            Ok(l) => (l.unwrap_or_default(), None),
+        let default_dir = saved::default_dir();
+        let mut save_error = None;
+        // A remembered folder that is gone (USB pulled) keeps folder.txt, so it is used again once back.
+        let dir = match default_dir.as_deref().and_then(saved::remembered_dir) {
+            Some(d) if d.is_dir() => Some(d),
+            Some(d) => {
+                save_error = Some(format!("저장 폴더를 찾을 수 없어 기본 폴더를 씁니다: {}", d.display()));
+                default_dir.clone()
+            }
+            None => default_dir.clone(),
+        };
+        // An existing file we cannot read must not be replaced by a shorter list: blocked until 읽기/쓰기.
+        let (saved, write_blocked) = match dir.as_deref().map(|d| saved::load(&d.join(saved::FILE))).transpose() {
+            Ok(l) => (l.unwrap_or_default(), false),
             Err(e) => {
-                saved_path = None;
-                (vec![], Some(format!("저장하지 못했습니다: {e}")))
+                save_error = Some(format!("읽지 못했습니다: {e}"));
+                (vec![], true)
             }
         };
         Self {
             saved,
-            saved_path,
+            default_dir,
+            dir,
+            write_blocked,
             naming: None,
             confirm_delete: false,
             save_error,
@@ -292,11 +326,68 @@ impl App {
 
     /// Writes the saved list; a failure shows in red under 안내 and the list stays in memory.
     fn persist(&mut self) {
-        let r = match &self.saved_path {
-            Some(p) => saved::store(p, &self.saved).map_err(|e| e.to_string()),
-            None => Err("저장 폴더를 찾을 수 없습니다".to_owned()),
-        };
+        let r = write_list(self.dir.as_deref(), self.write_blocked, &self.saved);
         self.save_error = r.err().map(|e| format!("저장하지 못했습니다: {e}"));
+    }
+
+    /// A new list (읽기, another folder) keeps the picked saved sound by name.
+    fn set_list(&mut self, list: Vec<Saved>) {
+        self.pick = repick(self.pick, &self.saved, &list);
+        self.saved = list;
+        self.readvise();
+    }
+
+    /// A read of the save folder: on failure the list stays and that folder is not written until 읽기/쓰기.
+    fn take_list(&mut self, r: std::io::Result<Vec<Saved>>) {
+        self.write_blocked = r.is_err();
+        self.save_error = match r {
+            Ok(l) => {
+                self.set_list(l);
+                None
+            }
+            Err(e) => Some(format!("읽지 못했습니다: {e}")),
+        };
+    }
+
+    /// `저장 폴더`: the path (cut with "…", full text on hover), 찾아보기…/폴더 열기, 읽기/쓰기.
+    fn folder_controls(&mut self, ui: &mut egui::Ui) {
+        ui.label("저장 폴더");
+        ui.label(self.dir.as_ref().map_or("저장 폴더를 찾을 수 없습니다".into(), |d| d.display().to_string()));
+        let on = self.dir.is_some();
+        let button = |ui: &mut egui::Ui, enabled, text| ui.add_enabled(enabled, egui::Button::new(text)).clicked();
+        let (browse, open) = ui.horizontal(|ui| (button(ui, true, "찾아보기…"), button(ui, on, "폴더 열기"))).inner;
+        let (read, write) = ui.horizontal(|ui| (button(ui, on, "읽기"), button(ui, on, "쓰기"))).inner;
+        if browse {
+            let dialog = rfd::FileDialog::new();
+            let dialog = match &self.dir {
+                Some(d) => dialog.set_directory(d),
+                None => dialog,
+            };
+            if let Some(d) = dialog.pick_folder() {
+                let remembered = self.default_dir.as_deref().map_or(Ok(()), |def| saved::remember_dir(def, &d));
+                let list = saved::adopt(&d, &self.saved);
+                self.dir = Some(d);
+                self.take_list(list);
+                // A read error matters more: it is the one that blocks saving.
+                if let (Err(e), false) = (remembered, self.write_blocked) {
+                    self.save_error = Some(format!("저장하지 못했습니다: {e}"));
+                }
+            }
+        }
+        if let (true, Some(d)) = (open, &self.dir)
+            && let Err(e) = saved::open_dir(d)
+        {
+            self.save_error = Some(format!("폴더를 열지 못했습니다: {e}"));
+        }
+        if let (true, Some(d)) = (read, &self.dir) {
+            let list = saved::load(&d.join(saved::FILE));
+            self.take_list(list);
+        }
+        if write {
+            let r = write_list(self.dir.as_deref(), false, &self.saved);
+            self.write_blocked &= r.is_err();
+            self.save_error = r.err().map(|e| format!("저장하지 못했습니다: {e}"));
+        }
     }
 
     /// `삭제`/`정말 삭제` for a picked saved sound, then `이 소리 저장` or the name field.
@@ -511,6 +602,8 @@ impl App {
                 live.levels.reset_clips();
             }
         });
+        ui.separator();
+        self.folder_controls(ui);
     }
 }
 
@@ -1200,5 +1293,27 @@ mod tests {
                         dynamic_range_db: 10.0, bands_db: saved_now.summary.as_ref().unwrap().bands_db };
         let a = advise(&natural(|f| hpf_db(100.0, f)), g, &saved_goal(&s, "m", g.label)); // 지금: 켜짐
         assert_eq!(knob(&a, "저역컷 100Hz"), Action::SwitchOff);
+    }
+
+    fn saved_sample(name: &str) -> Saved {
+        Saved { name: name.into(), mixer: "m".into(), group: "g".into(), dynamic_range_db: 9.0, bands_db: [0.0; 25] }
+    }
+    #[test] fn repick_follows_name() {
+        let (a, b, c) = (saved_sample("a"), saved_sample("b"), saved_sample("c"));
+        let old = [a.clone(), b.clone()];
+        assert_eq!(repick(Pick::Saved(1), &old, &[b.clone(), c.clone()]), Pick::Saved(0));
+        assert_eq!(repick(Pick::Saved(0), &old, &[b, c]), Pick::Preset(0));
+        assert_eq!(repick(Pick::Preset(3), &old, &[]), Pick::Preset(3));
+    }
+    #[test] fn blocked_write_keeps_file() {
+        let d = std::env::temp_dir().join(format!("mixer-analyzer-blocked-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join(saved::FILE), "keep me").unwrap();
+        assert_eq!(write_list(Some(d.as_path()), true, &[saved_sample("x")]),
+                   Err("읽지 못한 파일은 덮어쓰지 않습니다. [읽기]나 [쓰기]를 누르세요.".to_owned()));
+        assert_eq!(std::fs::read_to_string(d.join(saved::FILE)).unwrap(), "keep me");
+        assert_eq!(write_list(None, false, &[]), Err("저장 폴더를 찾을 수 없습니다".to_owned()));
+        assert!(write_list(Some(d.as_path()), false, &[saved_sample("x")]).is_ok());
+        std::fs::remove_dir_all(&d).unwrap();
     }
 }

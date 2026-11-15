@@ -9,6 +9,7 @@ egui_plot = "=0.38.0"
 cpal = "=0.18.2"
 realfft = "=3.5.1"
 rtrb = "=0.4.1"
+rfd = "=0.17.2"
 
 [profile.release]
 strip = true
