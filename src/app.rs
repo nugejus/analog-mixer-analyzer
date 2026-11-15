@@ -168,7 +168,15 @@ fn mixer_name(p: &MixerProfile) -> String {
 }
 
 /// A fresh engine each time, so every knob starts from ✓ (no deadband state carried over).
+/// Below 40 kHz the 16 kHz band is not measured: knob names and one note only (the graph stays).
 fn advise(a: &Analysis, group: &ChannelGroup, goal: &Goal) -> AdviceSet {
+    if a.sample_rate < 40_000.0 {
+        let note = format!(
+            "입력 샘플레이트가 {}kHz라 16kHz 대역까지 잴 수 없습니다. 믹서 USB 입력(44.1kHz 이상)을 고르세요.",
+            khz(a.sample_rate)
+        );
+        return AdviceSet { knobs: advice::labels(group), notes: vec![note], level_offset_db: 0.0 };
+    }
     let mut s = AdviceEngine::new().advise(
         group,
         &Inputs {
@@ -1449,6 +1457,14 @@ mod tests {
         assert_eq!(knobs(MixerModel::YamahaMg06x), 4);
     }
 
+    #[test] fn low_sample_rate_gives_names_and_one_note() {
+        let g = &MixerFactory::create(MixerModel::MackieProFx12v3).groups[0];
+        let goal = preset_goal(2, Voice::Male, g); // 300Hz 노트가 있는 목표
+        assert!(!goal.notes.is_empty());
+        let s = advise(&Analysis { sample_rate: 24_000.0, ..natural(|_| 6.0) }, g, &goal);
+        assert!(s.knobs.iter().all(|k| k.action == Action::Wait), "{:?}", s.knobs);
+        assert_eq!(s.notes, ["입력 샘플레이트가 24kHz라 16kHz 대역까지 잴 수 없습니다. 믹서 USB 입력(44.1kHz 이상)을 고르세요."]);
+    }
     #[test] fn presets_do_not_chase_switch_with_low() {
         let g = &MixerFactory::create(MixerModel::MackieProFx22v3).groups[0];
         for i in 1..PRESETS.len() {
