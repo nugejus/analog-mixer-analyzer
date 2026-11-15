@@ -7,6 +7,7 @@ pub mod saved;
 pub mod spectrum;
 pub mod speech;
 pub mod target;
+pub mod update;
 pub mod theme;
 #[cfg(test)]
 pub mod testsig;
