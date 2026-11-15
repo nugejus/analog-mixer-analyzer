@@ -325,6 +325,11 @@ fn knob_view(
     }
 }
 
+/// 상태 줄의 과부하 의심: 노브 줄(규칙 2·3은 엔진 노트를 버림)과 상관없이 마지막 분석의 엔진 결과.
+fn overloaded(a: Option<&Analysis>, group: &ChannelGroup, goal: &Goal) -> bool {
+    a.is_some_and(|a| advise(a, group, goal).notes.iter().any(|n| n == advice::OVERLOAD))
+}
+
 /// 노브 줄 머리글.
 fn header(v: &KnobView) -> Option<&'static str> {
     match v {
@@ -464,6 +469,8 @@ pub struct App {
     last_flat: Option<LastFlat>,
     /// Rebuilt by `readvise`.
     view: KnobView,
+    /// 과부하 의심; rebuilt by `readvise`.
+    overload: bool,
     show: Show,
     update: Update,
 }
@@ -534,6 +541,7 @@ impl App {
             analysis: None,
             last_flat: None,
             view: KnobView::None,
+            overload: false,
             show: Show::default(),
         }
     }
@@ -552,6 +560,7 @@ impl App {
         };
         let mixer = mixer_name(&self.profile);
         self.view = knob_view(self.analysis.as_ref(), saved, self.last_flat.as_ref(), &mixer, group, &self.goal);
+        self.overload = overloaded(self.analysis.as_ref(), group, &self.goal);
     }
 
     /// Writes the saved list; a failure shows in red under 안내 and the list stays in memory.
@@ -1412,11 +1421,7 @@ impl eframe::App for App {
                 spectrum_plot(ui, &live.curve, result.as_deref(), target, tone, &bumps, per_oct, &self.show, &spans, h * 0.6);
                 ui.strong("레벨/디스토션 기록 (최근 30초)");
                 level_plot(ui, live.levels.history(), h * 0.4);
-                status_line(
-                    ui,
-                    live,
-                    notes.iter().any(|n| n == advice::OVERLOAD),
-                );
+                status_line(ui, live, self.overload);
             }
             Err(e) => {
                 ui.strong("실시간 주파수 그래프");
@@ -1850,6 +1855,19 @@ mod tests {
             assert!(matches!(v, KnobView::None));
             assert_eq!(header(&v), None);
         }
+    }
+    #[test] fn overload_dot_follows_the_analysis() {
+        let (p, m, _) = knob_setup();
+        let g = &p.groups[0];
+        let goal = preset_goal(0, Voice::Male, g);
+        let flat = natural(|_| 0.0);
+        let done = as_is(natural(|f| hpf_db(100.0, f)));
+        let done = Analysis { summary: done.summary.map(|s| Summary { crest_db: 7.0, peak_db: -10.0, ..s }), ..done };
+        // 규칙 3(지금 노브 추정)은 엔진 노트를 버려도 상태 줄의 과부하 의심은 켜집니다.
+        assert!(matches!(knob_view(Some(&done), None, Some(&last_flat(&m, g.label, &flat)), &m, g, &goal), KnobView::Estimate(_)));
+        assert!(overloaded(Some(&done), g, &goal));
+        assert!(!overloaded(Some(&flat), g, &goal));
+        assert!(!overloaded(None, g, &goal));
     }
     #[test] fn dialog_enter_on_focused_as_is_button() {
         let g = &MixerFactory::create(MixerModel::MackieProFx22v3).groups[0];
