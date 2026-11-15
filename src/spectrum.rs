@@ -114,13 +114,28 @@ pub fn display_freqs(per_oct: usize) -> Vec<f32> {
         .collect()
 }
 
-pub fn display_db(bin_power: &[f32], sample_rate: f32, per_oct: usize) -> Vec<f32> {
+/// `smooth_n` > 0 averages each point over ±1/(2N) octave (cos² weights, power domain)
+/// and scales by the point's band bin count; 0 keeps the plain whole-bin sum.
+pub fn display_db(bin_power: &[f32], sample_rate: f32, per_oct: usize, smooth_n: usize) -> Vec<f32> {
     let half = 2f32.powf(0.5 / per_oct as f32);
     let bw = sample_rate / FFT_SIZE as f32;
     let last = bin_power.len() - 1;
     display_freqs(per_oct)
         .into_iter()
         .map(|f| {
+            if smooth_n > 0 {
+                let hw = (f * (2f32.powf(0.5 / smooth_n as f32) - 1.0)).max(bw);
+                let k_lo = ((f - hw) / bw).ceil().max(0.0) as usize;
+                let k_hi = (((f + hw) / bw).floor() as usize).min(last);
+                let (mut num, mut den) = (0.0f32, 0.0f32);
+                for (k, &p) in bin_power.iter().enumerate().take(k_hi + 1).skip(k_lo) {
+                    let c = (std::f32::consts::FRAC_PI_2 * (k as f32 * bw - f) / hw).cos();
+                    num += c * c * p;
+                    den += c * c;
+                }
+                let h = 2f32.powf(0.5 / per_oct as f32);
+                return db(num / den * (f * (h - 1.0 / h) / bw).max(1.0));
+            }
             let k_lo = (f / half / bw).ceil() as usize;
             let k_hi = ((f * half / bw).floor() as usize).min(last);
             if k_lo <= k_hi {
@@ -164,6 +179,35 @@ mod tests {
     use super::*;
     use crate::{target::BANDS_HZ, testsig::*};
 
+    /// Flat power keeps the display scale: mean power × the display band's (fractional, ≥ 1) bin count.
+    /// (Not compared to `smooth_n = 0`: that one counts whole bins, which is the sawtooth being removed.)
+    #[test]
+    fn smoothing_keeps_flat_level() {
+        let h = 2f32.powf(0.5 / 48.0);
+        for sr in [48_000.0f32, 44_100.0] {
+            let flat = vec![1e-6f32; FFT_SIZE / 2 + 1];
+            let bw = sr / FFT_SIZE as f32;
+            for n in [24, 12, 6, 3] {
+                for (f, d) in display_freqs(48).iter().zip(display_db(&flat, sr, 48, n)) {
+                    let want = db(1e-6 * (f * (h - 1.0 / h) / bw).max(1.0));
+                    assert!((d - want).abs() < 0.01, "sr {sr} n {n} f {f}: {d} vs {want}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn smoothing_removes_low_steps() {
+        let sr = 48_000.0;
+        let rising: Vec<f32> = (0..=FFT_SIZE / 2).map(|k| 1e-6 * (1.0 + k as f32)).collect();
+        let fs = display_freqs(48);
+        let low: Vec<usize> = (0..fs.len()).filter(|&i| fs[i] > 40.0 && fs[i] < 150.0).collect();
+        let none = display_db(&rising, sr, 48, 0);
+        assert!(low.windows(2).any(|w| none[w[0]] == none[w[1]]), "old method has steps");
+        let six = display_db(&rising, sr, 48, 6);
+        assert!(low.windows(2).all(|w| six[w[1]] > six[w[0]]), "smoothed rises every point");
+    }
+
     #[test]
     fn display_to_band_db_matches_widths() {
         let near = |a: f32, b: f32| assert!((a - b).abs() < 0.05, "{a} vs {b}");
@@ -188,7 +232,7 @@ mod tests {
         let mut disp = vec![0.0f32; 240];
         let mut bands = [0.0f32; 25];
         for f in &frames {
-            for (a, d) in disp.iter_mut().zip(display_db(&f.bin_power, sr, 24)) {
+            for (a, d) in disp.iter_mut().zip(display_db(&f.bin_power, sr, 24, 0)) {
                 *a += 10f32.powf(d / 10.0) / n;
             }
             for (a, d) in bands.iter_mut().zip(third_octave_db(&f.bin_power, sr)) {
@@ -246,7 +290,7 @@ mod tests {
         );
         assert_eq!(f.rms_db, FLOOR_DB);
         assert!(
-            display_db(&f.bin_power, 48_000.0, 24)
+            display_db(&f.bin_power, 48_000.0, 24, 0)
                 .iter()
                 .all(|b| b.is_finite())
         );
@@ -278,7 +322,7 @@ mod tests {
         let a = Spectrum::new(sr).push(&sine(sr, 1000.0, 0.5, 1.0)).pop().unwrap().bin_power;
         let b = Spectrum::new(sr).push(&noise(48_000, 0.3)).pop().unwrap().bin_power;
         let mean: Vec<f32> = a.iter().zip(&b).map(|(x, y)| (x + y) / 2.0).collect();
-        let (da, db_, dm) = (display_db(&a, sr, 48), display_db(&b, sr, 48), display_db(&mean, sr, 48));
+        let (da, db_, dm) = (display_db(&a, sr, 48, 0), display_db(&b, sr, 48, 0), display_db(&mean, sr, 48, 0));
         for i in 0..dm.len() {
             let want = db((10f32.powf(da[i] / 10.0) + 10f32.powf(db_[i] / 10.0)) / 2.0);
             assert!((dm[i] - want).abs() < 0.01, "{i}: {} vs {want}", dm[i]);
@@ -292,7 +336,7 @@ mod tests {
             .push(&sine(sr, hz, 0.5, 1.0))
             .pop()
             .unwrap();
-        let d = display_db(&f.bin_power, sr, 24);
+        let d = display_db(&f.bin_power, sr, 24, 0);
         assert!((d[136] + 9.03).abs() < 1.0, "{}", d[136]);
     }
     #[test]
@@ -302,7 +346,7 @@ mod tests {
             .push(&sine(sr, 50.0, 0.5, 1.0))
             .pop()
             .unwrap();
-        let d = display_db(&f.bin_power, sr, 24);
+        let d = display_db(&f.bin_power, sr, 24, 0);
         assert!(d.iter().all(|v| v.is_finite()));
         assert!(d[32] > -15.0, "{}", d[32]); // 20*2^(32/24) = 50.4 Hz
         let hi = display_freqs(24).iter().position(|&x| x > 200.0).unwrap();

@@ -25,6 +25,9 @@ const TICKS_HZ: [f64; 10] = [20.0, 50.0, 100.0, 200.0, 500.0, 1e3, 2e3, 5e3, 1e4
 const SMOOTHING: [(&str, f32); 3] = [("빠름 0.3초", 0.3), ("보통 1초", 1.0), ("느림 3초", 3.0)];
 const RESOLUTIONS: [(&str, usize); 4] =
     [("1/12옥타브", 12), ("1/24옥타브", 24), ("1/48옥타브", 48), ("1/96옥타브", 96)];
+/// 주파수 평활: (label, N of 1/N octave; 0 = off).
+const FREQ_SMOOTH: [(&str, usize); 5] =
+    [("없음", 0), ("1/24옥타브", 24), ("1/12옥타브", 12), ("1/6옥타브", 6), ("1/3옥타브", 3)];
 const KNOB_W: f32 = 96.0;
 /// Left control panel width.
 const SIDE_W: f32 = 270.0;
@@ -75,9 +78,9 @@ struct Analysis {
 }
 
 /// The analysed spectrum on the display points of the chosen resolution.
-fn result_db(a: &Analysis, per_oct: usize) -> Option<Vec<f32>> {
+fn result_db(a: &Analysis, per_oct: usize, smooth_n: usize) -> Option<Vec<f32>> {
     let s = a.summary.as_ref()?;
-    Some(spectrum::display_db(&s.bin_power, a.sample_rate, per_oct))
+    Some(spectrum::display_db(&s.bin_power, a.sample_rate, per_oct, smooth_n))
 }
 
 /// What the advice aims at: a 1/3-octave target, notes about it, and the saved DR in restore mode.
@@ -191,7 +194,7 @@ impl Live {
     }
 
     /// Drains whole frames from the ring and runs every analyser on them.
-    fn pump(&mut self, channel: usize, tau_s: f32, per_oct: usize) {
+    fn pump(&mut self, channel: usize, tau_s: f32, per_oct: usize, smooth_n: usize) {
         let (sr, ch) = (self.input.sample_rate, self.input.channels.max(1));
         let n = self.input.rx.slots() / ch * ch;
         let data: Vec<f32> = self
@@ -205,7 +208,7 @@ impl Live {
         }
         self.levels.push_interleaved(&data);
         for f in self.spectrum.push(&audio::pick_channel(&data, ch, channel)) {
-            let display = spectrum::display_db(&f.bin_power, sr, per_oct);
+            let display = spectrum::display_db(&f.bin_power, sr, per_oct, smooth_n);
             self.howl = self.feedback.push(&f.bin_power);
             self.curve.update(&display, HOP as f32 / sr, tau_s);
             if let Some(r) = self.rec.as_mut().filter(|r| !r.done()) {
@@ -273,6 +276,8 @@ pub struct App {
     smooth: usize,
     /// Index into `RESOLUTIONS`.
     res: usize,
+    /// Index into `FREQ_SMOOTH`.
+    freq_smooth: usize,
     analysis: Option<Analysis>,
     advice: Option<AdviceSet>,
     show: Show,
@@ -334,6 +339,7 @@ impl App {
             rec_seconds: 20,
             smooth: 1,
             res: 2,
+            freq_smooth: 3,
             analysis: None,
             advice: None,
             show: Show::default(),
@@ -624,7 +630,16 @@ impl App {
                     ui.selectable_value(&mut self.res, i, label);
                 }
             });
-        if self.res != before
+        ui.label("주파수 평활");
+        let smooth_before = self.freq_smooth;
+        egui::ComboBox::from_id_salt("freq_smooth")
+            .selected_text(FREQ_SMOOTH[self.freq_smooth].0)
+            .show_ui(ui, |ui| {
+                for (i, (label, _)) in FREQ_SMOOTH.into_iter().enumerate() {
+                    ui.selectable_value(&mut self.freq_smooth, i, label);
+                }
+            });
+        if (self.res != before || self.freq_smooth != smooth_before)
             && let Ok(live) = &mut self.live
         {
             live.curve = DisplayCurve::new(spectrum::display_freqs(RESOLUTIONS[self.res].1).len());
@@ -1011,7 +1026,12 @@ fn knob_row(ui: &mut egui::Ui, knobs: &[Advice]) {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let finished = self.live.as_mut().ok().and_then(|live| {
-            live.pump(self.channel, SMOOTHING[self.smooth].1, RESOLUTIONS[self.res].1);
+            live.pump(
+                self.channel,
+                SMOOTHING[self.smooth].1,
+                RESOLUTIONS[self.res].1,
+                FREQ_SMOOTH[self.freq_smooth].1,
+            );
             let rec = live.rec.take_if(|r| r.done())?;
             let n = self.rec_seconds as f32;
             Some(Analysis {
@@ -1092,7 +1112,7 @@ impl eframe::App for App {
                     ui.checkbox(&mut sh.knobs, c("노브 구간", mocha::OVERLAY1));
                 });
                 let spans = knob_spans(&self.profile.groups[self.group], advice);
-                let result = self.analysis.as_ref().and_then(|a| result_db(a, per_oct));
+                let result = self.analysis.as_ref().and_then(|a| result_db(a, per_oct, FREQ_SMOOTH[self.freq_smooth].1));
                 spectrum_plot(ui, &live.curve, result.as_deref(), target, per_oct, &self.show, &spans, h * 0.6);
                 ui.strong("레벨/디스토션 기록 (최근 30초)");
                 level_plot(ui, live.levels.history(), h * 0.4);
@@ -1235,7 +1255,7 @@ mod tests {
         live.last_data = Instant::now() - Duration::from_secs(4);
         assert!(live.silent());
         std::thread::sleep(Duration::from_millis(100));
-        live.pump(0, 1.0, 48);
+        live.pump(0, 1.0, 48, 0);
         assert!(!live.silent());
     }
 
@@ -1243,7 +1263,7 @@ mod tests {
     fn live_built_at_96_handles_its_frames() {
         let mut live = Live::new(audio::open_demo(), 96);
         std::thread::sleep(Duration::from_millis(600));
-        live.pump(0, 1.0, 96);
+        live.pump(0, 1.0, 96, 0);
     }
 
     #[test]
@@ -1306,7 +1326,7 @@ mod tests {
                                     snr_db: 50.0, dynamic_range_db: 10.0, crest_db: 18.0, active_seconds: 10.0 }),
             sample_rate: sr, seconds: 20, clipped: false, howl: None, silent: false,
         };
-        let d = result_db(&a, 48).unwrap();
+        let d = result_db(&a, 48, 0).unwrap();
         let freqs = spectrum::display_freqs(48);
         let top = (0..d.len()).max_by(|&i, &j| d[i].total_cmp(&d[j])).unwrap();
         assert!((freqs[top] / 1000.0).log2().abs() <= 1.0 / 48.0, "{}", freqs[top]);
