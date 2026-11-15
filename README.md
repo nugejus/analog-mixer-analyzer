@@ -4,7 +4,10 @@
 
 ## 설치
 - **Mac**: 화면 왼쪽 위 Apple 메뉴 → **이 Mac에 관하여**에서 칩을 확인합니다. "Apple M…"이면 `MixerAnalyzer-mac-AppleSilicon.zip`, "Intel"이면 `MixerAnalyzer-mac-Intel.zip`을 받아 풀고 `MixerAnalyzer.app`을 응용 프로그램 폴더로 옮깁니다.
-- **Windows**: `MixerAnalyzer-win.zip`을 풀면 나오는 `MixerAnalyzer.exe`를 원하는 폴더에 두고 실행합니다. 설치는 필요 없습니다.
+- **Windows**: `MixerAnalyzer-Setup.exe`를 받아 실행하면 설치되고, 시작 메뉴·바탕화면의 **믹서 분석기**로 켭니다. 제거는 설정 → 앱 → **믹서 분석기**. 저장한 세팅은 제거해도 남습니다.
+
+## 업데이트
+앱을 켤 때 새 버전을 확인해 왼쪽 패널 맨 위에 **새 버전이 있습니다**가 뜹니다. Windows는 **업데이트**를 누르면 받아서 설치 화면을 열고 앱이 닫힙니다(방송 중에는 누르지 마세요). Mac은 **받으러 가기**로 드라이브 폴더를 열어 새 zip으로 앱을 바꿉니다. 인터넷이 없으면 아무것도 뜨지 않습니다. 지금 버전은 왼쪽 패널 맨 아래에 있습니다.
 
 ## 첫 실행
 ### Mac
@@ -13,7 +16,7 @@
 3. 마이크 권한을 물으면 **허용**합니다. 나중에 바꾸려면 시스템 설정 → 개인정보 보호 및 보안 → 마이크에서 합니다. 권한이 꺼져 있으면 소리가 무음으로 들어와서 "입력 신호가 없습니다"가 뜹니다.
 
 ### Windows
-1. "Windows의 PC 보호" 창이 뜨면 **추가 정보 → 실행**을 누릅니다.
+1. 설치 파일을 처음 실행할 때 "Windows의 PC 보호" 창이 뜨면 **추가 정보 → 실행**을 누릅니다.
 2. 소리가 안 들어오면 설정 → 개인 정보 및 보안 → 마이크에서 앱의 마이크 접근을 켭니다.
 
 ## 믹서별 연결
@@ -58,5 +61,5 @@
 - 저장할 때 **채널 스트립 사진도 찍어 두세요.** 노브 위치를 그대로 볼 수 있어서 복구할 때 함께 보면 좋습니다.
 
 ## 라이선스 고지
-- 글꼴 Pretendard Regular: SIL Open Font License 1.1 (zip의 `Pretendard-LICENSE.txt` 참고).
+- 글꼴 Pretendard Regular: SIL Open Font License 1.1 (설치 폴더나 zip의 `Pretendard-LICENSE.txt` 참고).
 - 색상 Catppuccin Mocha: MIT License, Copyright (c) 2021 Catppuccin.
