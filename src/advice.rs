@@ -446,8 +446,9 @@ impl AdviceEngine {
 }
 
 /// 가운데 소리(측정)에서 완성 소리(목표)를 만든 노브 위치: 새 엔진의 복구 계산(저장 DR = 완성 DR).
-/// GAIN은 가운데 소리와 상관없으므로 늘 ✓이고, 엔진 노트는 버립니다.
-pub fn knob_positions(group: &ChannelGroup, flat: &Summary, final_bands: &[f32; 25], final_dr: f32) -> Vec<Advice> {
+/// GAIN은 가운데 소리와 상관없으므로 늘 ✓이고, 엔진 노트는 버립니다. EQ 노브가 끝(±15 dB)에 닿으면 두 소리
+/// 차이를 노브로 설명하지 못한 것이라(두 분석 사이에 말하는 사람·마이크가 바뀜) `None`입니다.
+pub fn knob_positions(group: &ChannelGroup, flat: &Summary, final_bands: &[f32; 25], final_dr: f32) -> Option<Vec<Advice>> {
     let inp = Inputs {
         summary: Some(flat),
         target: final_bands,
@@ -460,7 +461,9 @@ pub fn knob_positions(group: &ChannelGroup, flat: &Summary, final_bands: &[f32; 
     for k in knobs.iter_mut().filter(|k| matches!(k.control, Control::Gain { .. })) {
         k.action = Action::Ok;
     }
-    knobs
+    // GAIN은 ✓, COMP의 db는 0이라 EQ 노브만 걸립니다.
+    let railed = knobs.iter().any(|k| matches!(k.action, Action::Rotate { db, .. } if db.abs() >= EQ_LIMIT_DB));
+    (!railed).then_some(knobs)
 }
 
 /// 저장된 가운데 소리(대역과 DR만 있음)를 `knob_positions`에 넣을 요약으로. 나머지 값은 엔진이 따로 반응하지 않게 고릅니다.
@@ -730,7 +733,7 @@ fn at(k: &[Advice], label: &str) -> Action { k.iter().find(|k| k.label == label)
         flat[b] + 6.0 * Shape::HighShelf(12_000.0).response(f) - 6.0 * Shape::Bell(800.0).response(f)
             - 3.0 * Shape::LowShelf(80.0).response(f) + hpf_db(100.0, f)
     });
-    let k = knob_positions(&g, &neutral_summary(flat, 10.0), &fin, 10.0);
+    let k = knob_positions(&g, &neutral_summary(flat, 10.0), &fin, 10.0).unwrap();
     assert!((5.0..=7.0).contains(&db_of(at(&k, "HIGH 12kHz"))), "{k:?}");
     assert!(matches!(at(&k, "FREQ"), Action::SetFreq { hz } if [630.0, 800.0, 1000.0].contains(&hz)), "{k:?}");
     assert!((-7.0..=-5.0).contains(&db_of(at(&k, "MID"))), "{k:?}");
@@ -747,7 +750,7 @@ fn at(k: &[Advice], label: &str) -> Action { k.iter().find(|k| k.label == label)
         flat[b] + 6.0 * Shape::HighShelf(12_000.0).response(f) - 6.0 * Shape::Bell(1_000.0).response(f)
             - 4.0 * Shape::Bell(200.0).response(f) + hpf_db(100.0, f)
     });
-    let k = knob_positions(&g, &neutral_summary(flat, 10.0), &fin, 10.0);
+    let k = knob_positions(&g, &neutral_summary(flat, 10.0), &fin, 10.0).unwrap();
     assert!((5.0..=7.0).contains(&db_of(at(&k, "HIGH 12kHz"))), "{k:?}");
     assert!(matches!(at(&k, "FREQ 1"), Action::SetFreq { hz } if [800.0, 1000.0, 1250.0].contains(&hz)), "{k:?}");
     assert!((-7.0..=-5.0).contains(&db_of(at(&k, "MID 1"))), "{k:?}");
@@ -762,25 +765,30 @@ fn at(k: &[Advice], label: &str) -> Action { k.iter().find(|k| k.label == label)
     let flat = ltass_db(Voice::Male);
     for (bell, db) in [(160.0, -4.0), (200.0, -5.0), (250.0, -6.0)] {
         let fin = std::array::from_fn(|b| flat[b] + hpf_db(75.0, BANDS_HZ[b]) + db * Shape::Bell(bell).response(BANDS_HZ[b]));
-        let k = knob_positions(&g, &neutral_summary(flat, 10.0), &fin, 10.0);
+        let k = knob_positions(&g, &neutral_summary(flat, 10.0), &fin, 10.0).unwrap();
         assert_eq!(at(&k, "저역컷 75Hz"), Action::SwitchOn, "{bell} {db}: {k:?}");
         assert_eq!(at(&k, "LOW 80Hz"), Action::Ok, "{bell} {db}: {k:?}");
     }
     // LOW만 깎았으면 스위치가 아닙니다.
     let fin = std::array::from_fn(|b| flat[b] - 6.0 * Shape::LowShelf(80.0).response(BANDS_HZ[b]));
-    assert_eq!(at(&knob_positions(&g, &neutral_summary(flat, 10.0), &fin, 10.0), "저역컷 75Hz"), Action::Ok);
+    assert_eq!(at(&knob_positions(&g, &neutral_summary(flat, 10.0), &fin, 10.0).unwrap(), "저역컷 75Hz"), Action::Ok);
 }
 #[test] fn flat_saved_right_after_flat_analysis_is_all_ok() {
     let flat = ltass_db(Voice::Male);
-    let k = knob_positions(&group(V3, 0), &neutral_summary(flat, 10.0), &flat, 10.0);
+    let k = knob_positions(&group(V3, 0), &neutral_summary(flat, 10.0), &flat, 10.0).unwrap();
     assert!(k.iter().all(|k| k.action == Action::Ok), "{k:?}");
     // 규칙 3의 진짜 가운데 요약은 조용할 수 있지만(엔진은 GAIN +20을 냄) 노브 위치의 GAIN은 늘 ✓입니다.
     let quiet = Summary { peak_db: -35.0, ..neutral_summary(flat, 10.0) };
-    assert_eq!(at(&knob_positions(&group(V3, 0), &quiet, &flat, 10.0), "GAIN"), Action::Ok);
+    assert_eq!(at(&knob_positions(&group(V3, 0), &quiet, &flat, 10.0).unwrap(), "GAIN"), Action::Ok);
+}
+#[test] fn speaker_change_gives_no_positions() {
+    // 가운데는 여성, 그대로는 남성(노브는 안 돌림): LOW가 +15 끝에 닿으니 노브 위치가 아닙니다.
+    let k = knob_positions(&group(V3, 0), &neutral_summary(ltass_db(Voice::Female), 10.0), &ltass_db(Voice::Male), 10.0);
+    assert!(k.is_none(), "{k:?}");
 }
 #[test] fn comp_from_dynamic_range() {
     let flat = ltass_db(Voice::Male);
-    let comp = |flat_dr| at(&knob_positions(&group(V3, 0), &neutral_summary(flat, flat_dr), &flat, 12.0), "COMP");
+    let comp = |flat_dr| at(&knob_positions(&group(V3, 0), &neutral_summary(flat, flat_dr), &flat, 12.0).unwrap(), "COMP");
     assert_eq!(comp(18.0), Action::Rotate { degrees: 30.0, db: 0.0 });
     assert_eq!(comp(12.0), Action::Ok);
 }

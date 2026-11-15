@@ -271,6 +271,7 @@ impl LastFlat {
 
 const DIFFERS: &str = "오늘 소리 기준 추천이 저장된 노브 위치와 다릅니다(마이크·목소리·자리가 바뀌었을 수 있음). 오늘 소리 기준인 지금 추천을 따르세요.";
 const NEED_FLAT: &str = "가운데에서 분석하면 노브 추천이 나옵니다. 그다음 세팅을 바꾸고 '지금 세팅 그대로 분석'을 누르면 지금 노브 위치를 추정합니다.";
+const UNSURE: &str = "가운데 분석과 소리 차이가 너무 커서(노브 하나가 끝까지 돌아간 것으로 나옴) 지금 노브 위치를 추정하지 않았습니다. 말하는 사람이나 마이크가 바뀌었다면 가운데 분석부터 다시 하세요(두 분석은 같은 사람·같은 마이크로). 이대로 저장하면 소리만 쓰입니다.";
 const NO_FLAT_SAVED: &str = "가운데 분석이 없어 노브 위치는 저장하지 않았습니다(소리만 저장).";
 
 /// 노브 줄에 보일 것(spec 규칙 1–5).
@@ -299,7 +300,7 @@ fn knob_view(
     let stored = saved.filter(|s| s.mixer == mixer && s.group == group.label).and_then(|s| {
         let f = s.flat.as_ref()?;
         let flat = advice::neutral_summary(f.bands_db, f.dynamic_range_db);
-        Some(advice::knob_positions(group, &flat, &s.bands_db, s.dynamic_range_db))
+        advice::knob_positions(group, &flat, &s.bands_db, s.dynamic_range_db)
     });
     let Some(a) = analysis else {
         return stored.map_or(KnobView::None, KnobView::Stored);
@@ -317,7 +318,8 @@ fn knob_view(
     match (last_flat.filter(|l| l.fits(mixer, group.label, a.sample_rate)), &a.summary) {
         // 말소리 부족·낮은 샘플레이트는 엔진처럼 노브 이름과 그 노트로 알립니다.
         _ if a.summary.is_none() || a.sample_rate < MIN_RATE => KnobView::Advice(advise(a, group, goal)),
-        (Some(l), Some(s)) => KnobView::Estimate(advice::knob_positions(group, &l.summary, &s.bands_db, s.dynamic_range_db)),
+        (Some(l), Some(s)) => advice::knob_positions(group, &l.summary, &s.bands_db, s.dynamic_range_db)
+            .map_or_else(|| KnobView::Names(UNSURE.into()), KnobView::Estimate),
         _ => KnobView::Names(NEED_FLAT.into()),
     }
 }
@@ -1833,6 +1835,9 @@ mod tests {
         // 그대로 분석이 말소리 부족이면 그 노트(잘못된 추천 없음).
         let short = as_is(Analysis { summary: None, ..natural(|_| 0.0) });
         assert!(matches!(view(Some(&short), None, Some(&lf)), KnobView::Advice(a) if a.knobs.iter().all(|k| k.action == Action::Wait)));
+        // 3이어도 노브가 끝까지 가면(그사이 말하는 사람·마이크가 바뀜) 추정하지 않습니다.
+        let far = as_is(natural(|f| 20.0 * advice::Shape::LowShelf(80.0).response(f)));
+        assert!(matches!(view(Some(&far), None, Some(&lf)), KnobView::Names(n) if n == UNSURE));
         // 5: 분석 없음(옛 저장도).
         for saved in [None, Some(&old)] {
             let v = view(None, saved, Some(&lf));
