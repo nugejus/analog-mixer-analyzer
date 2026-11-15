@@ -11,7 +11,7 @@ const LOW_BOOST_MAX_DB: f32 = 3.0;
 const OK_BELOW_DB: f32 = 1.5;
 const OK_RELEASE_DB: f32 = 2.5;
 const NO_INPUT: &str = "입력 신호가 없습니다. 케이블과 입력장치를 확인하세요. macOS에서는 시스템 설정 > 개인정보 보호 및 보안 > 마이크에서 이 앱을 허용하세요.";
-const KEEP_TALKING: &str = "말씀을 계속해 주세요";
+const KEEP_TALKING: &str = "말소리가 부족합니다. [분석]을 다시 누르고 녹음이 끝날 때까지 평소처럼 말씀해 주세요.";
 pub const OVERLOAD: &str = "과부하 의심: 아날로그 단에서 눌리거나 COMP가 과한 경우입니다.";
 
 fn weight(b: usize) -> f32 {
@@ -357,7 +357,7 @@ fn summary(dev: impl Fn(f32) -> f32) -> Summary {
     let t = ltass_db(Voice::Male);
     let mut bands = [0.0; 25];
     for (i, b) in bands.iter_mut().enumerate() { *b = t[i] - 40.0 + dev(BANDS_HZ[i]); }
-    Summary { bands_db: bands, peak_db: -12.0, rms_db: -30.0, noise_floor_db: -80.0, snr_db: 50.0,
+    Summary { bands_db: bands, display_db: vec![], peak_db: -12.0, rms_db: -30.0, noise_floor_db: -80.0, snr_db: 50.0,
               dynamic_range_db: 10.0, crest_db: 18.0, active_seconds: 4.0 }
 }
 fn run(e: &mut AdviceEngine, g: &ChannelGroup, s: &Summary) -> AdviceSet {
@@ -451,7 +451,7 @@ const FX12: MixerModel = MixerModel::MackieProFx12v3;
     assert!(a.knobs.iter().all(|k| k.action == Action::Wait));
     assert!(a.notes.iter().any(|n| n.contains("입력 신호가 없습니다")));
     let b = e.advise(&group(V3, 0), &Inputs { summary: None, target: &t, clipped_recently: false, feedback_hz: None, silent: false });
-    assert!(b.notes.iter().any(|n| n.contains("말씀을 계속해 주세요")));
+    assert!(b.notes.iter().any(|n| n.contains("말소리가 부족합니다")));
 }
 #[test] fn group_change_resets_state() {
     let mut e = AdviceEngine::new();

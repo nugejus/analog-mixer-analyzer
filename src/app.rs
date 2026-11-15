@@ -66,14 +66,11 @@ impl Live {
         }
         self.levels.push_interleaved(&data);
         for f in self.spectrum.push(&audio::pick_channel(&data, ch, channel)) {
+            let display = spectrum::display_db(&f.bin_power, sr);
             self.speech
-                .push(&f, &spectrum::third_octave_db(&f.bin_power, sr));
+                .push(&f, &spectrum::third_octave_db(&f.bin_power, sr), &display);
             self.howl = self.feedback.push(&f.bin_power);
-            self.curve.update(
-                &spectrum::display_db(&f.bin_power, sr),
-                HOP as f32 / sr,
-                1.0,
-            );
+            self.curve.update(&display, HOP as f32 / sr, 1.0);
         }
     }
 
