@@ -132,7 +132,11 @@ pub const TONE_BANDS: [(&str, f32, f32); 8] = [
     ("공기감", 10000.0, 20000.0),
 ];
 
-/// Per tone band: 10·log10(Σ measured power / Σ reference power), in dB.
+/// A tone band this far above (red) or below (blue) the reference is flagged on the graph.
+pub const TONE_HOT_DB: f32 = 3.0;
+
+/// Per tone band: 10·log10(Σ measured power / Σ reference power), in dB, rounded to 0.1 so the
+/// graph and the knob advice see the same value (+ 0.0 keeps -0.0 out).
 pub fn tone_excess(measured: &[f32; 25], reference: &[f32; 25]) -> [f32; 8] {
     TONE_BANDS.map(|(_, lo, hi)| {
         let (mut m, mut r) = (0.0f32, 0.0f32);
@@ -140,7 +144,7 @@ pub fn tone_excess(measured: &[f32; 25], reference: &[f32; 25]) -> [f32; 8] {
             m += 10f32.powf(measured[i] / 10.0);
             r += 10f32.powf(reference[i] / 10.0);
         }
-        10.0 * (m / r).log10()
+        (10.0 * (m / r).log10() * 10.0).round() / 10.0 + 0.0
     })
 }
 

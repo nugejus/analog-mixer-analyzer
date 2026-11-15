@@ -2,12 +2,13 @@
 
 use crate::mixers::{ChannelGroup, Control, EQ_RANGE_DB, KNOB_TRAVEL_DEG};
 use crate::speech::Summary;
-use crate::target::{BANDS_HZ, hpf_db};
+use crate::target::{BANDS_HZ, TONE_BANDS, TONE_HOT_DB, hpf_db, level_match_db, tone_excess};
 
 const LAMBDA: f32 = 0.01;
 const FIT_BANDS: std::ops::RangeInclusive<usize> = 2..=23; // 100 Hz–12.5 kHz
 const EQ_LIMIT_DB: f32 = 15.0;
 const LOW_BOOST_MAX_DB: f32 = 3.0;
+const HIGH_BOOST_MAX_DB: f32 = 6.0;
 const OK_BELOW_DB: f32 = 1.5;
 const OK_RELEASE_DB: f32 = 2.5;
 pub const NO_INPUT: &str = "입력 신호가 없습니다. 케이블과 입력장치를 확인하세요. macOS에서는 시스템 설정 > 개인정보 보호 및 보안 > 마이크에서 이 앱을 허용하세요.";
@@ -304,6 +305,12 @@ impl AdviceEngine {
         }
         let (gains, c, _) = fit_eq(&d, &shapes(&hz));
 
+        // 노브 추천이 그래프의 빨강/파랑 대역과 어긋나면 안 됩니다: 노브 중심이 빨간 대역이면 올리지 않고,
+        // 파란 대역이면 깎지 않습니다(그래프와 같은 계산).
+        let lvl = level_match_db(&s.bands_db, inp.target);
+        let reference: [f32; 25] = std::array::from_fn(|b| inp.target[b] + lvl);
+        let tone = tone_excess(&s.bands_db, &reference);
+
         let mut main = vec![Action::Ok; ctl.len()];
         let mut freq_act = vec![Action::Ok; ctl.len()];
         for (&i, &g) in eq.iter().zip(&gains) {
@@ -311,10 +318,24 @@ impl AdviceEngine {
             // 스위치가 100–160 Hz에서 깎은 만큼을 LOW가 되채우면 같은 저역을 둘이 반대로 쫓습니다.
             let max = if restore.is_none() && matches!(ctl[i], Control::LowShelf { .. }) {
                 if switch > 0.0 { 0.0 } else { LOW_BOOST_MAX_DB }
+            } else if restore.is_none() && matches!(ctl[i], Control::HighShelf { .. }) {
+                HIGH_BOOST_MAX_DB
             } else {
                 EQ_LIMIT_DB
             };
-            let g = g.clamp(-EQ_LIMIT_DB, max);
+            let centre = match ctl[i] {
+                Control::LowShelf { hz } | Control::HighShelf { hz } => hz,
+                _ => hz[i],
+            };
+            let (mut max, mut min) = (max, -EQ_LIMIT_DB);
+            if let Some(t) = TONE_BANDS.iter().position(|&(_, lo, hi)| (lo..hi).contains(&centre)) {
+                if tone[t] >= TONE_HOT_DB {
+                    max = max.min(0.0);
+                } else if tone[t] <= -TONE_HOT_DB {
+                    min = 0.0;
+                }
+            }
+            let g = g.clamp(min, max);
             let ok = &mut self.ok[i];
             if *ok && g.abs() > OK_RELEASE_DB {
                 *ok = false;
@@ -559,5 +580,41 @@ fn with(dev: impl Fn(f32) -> f32) -> [f32; 25] { let t = ltass_db(Voice::Male); 
     assert_eq!(rotate_degrees(2.4, 10.0), 25.0);
     assert_eq!([fmt_hz(400.0), fmt_hz(2_500.0), fmt_hz(12_000.0), fmt_hz(1_250.0), fmt_hz(80.0)],
                ["400Hz", "2.5kHz", "12kHz", "1.25kHz", "80Hz"]);
+}
+
+fn sum_of(bands: [f32; 25]) -> Summary {
+    Summary { bands_db: bands, ..summary(|_| 0.0) }
+}
+#[test] fn screenshot_case_follows_the_bands() {
+    let g = group(V3, 0);
+    let (t, _) = preset_target(&PRESETS[3], Voice::Male, &g);
+    let d = [-2.3, -6.5, -10.5, 1.6, 7.0, 11.4, 1.7, 1.5, 3.4, 1.0, 4.0, 2.8, -1.0, 5.9, 0.6, -3.9, -3.9, -1.1, -3.4, -4.0, -0.5, -2.7, -7.7, -13.0, -16.0];
+    let s = sum_of(std::array::from_fn(|i| t[i] + d[i] - 20.0));
+    let a = run_t(&g, &s, t, None);
+    assert_eq!(act(&a, "LOW 80Hz"), Action::Ok);
+    assert!((db_of(act(&a, "HIGH 12kHz")) - 6.0).abs() < 1e-3);
+    assert!(db_of(act(&a, "MID")) < -10.0);
+    assert_eq!(act(&a, "FREQ"), Action::SetFreq { hz: 160.0 });
+    // 복구 모드에는 LOW 한도가 없지만, 빨간 웅웅거림 구간이라 여기서도 올리지 않습니다.
+    let r = run_t(&g, &s, t, Some(s.dynamic_range_db));
+    assert!(!matches!(act(&r, "LOW 80Hz"), Action::Rotate { db, .. } if db > 0.0), "{:?}", act(&r, "LOW 80Hz"));
+}
+#[test] fn high_boost_capped_only_in_normal_mode() {
+    let g = group(V3, 0);
+    let s = summary(|f| if f >= 8000.0 { -12.0 } else { 0.0 });
+    let t = ltass_db(Voice::Male);
+    assert!((db_of(act(&run_t(&g, &s, t, None), "HIGH 12kHz")) - 6.0).abs() < 1e-3);
+    assert!(db_of(act(&run_t(&g, &s, t, Some(s.dynamic_range_db)), "HIGH 12kHz")) > 6.0);
+}
+#[test] fn no_cut_into_a_blue_band() {
+    // 무작위 탐색에서 찾은 사례: HIGH가 10–20 kHz 대역(파랑)에서 -4.6 dB를 깎으라고 하던 경우.
+    let g = group(V3, 0);
+    let t = ltass_db(Voice::Male);
+    let d = [6.66, -10.65, 11.98, 10.44, -7.73, 1.32, 3.12, -6.10, 2.73, 7.70, 7.77, -9.03, 3.92, 2.54, -9.35, -2.70, -5.65, 3.92, -6.72, -6.00, 10.27, -9.60, 0.39, -5.73, -9.54];
+    let s = sum_of(std::array::from_fn(|i| t[i] + d[i] - 20.0));
+    let lvl = level_match_db(&s.bands_db, &t);
+    let reference: [f32; 25] = std::array::from_fn(|i| t[i] + lvl);
+    assert!(tone_excess(&s.bands_db, &reference)[7] <= -TONE_HOT_DB);
+    assert_eq!(act(&run_t(&g, &s, t, None), "HIGH 12kHz"), Action::Ok);
 }
 }

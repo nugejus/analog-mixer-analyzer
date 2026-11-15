@@ -834,15 +834,14 @@ fn spectrum_plot(
         }
     })
     .show(ui, |p| {
-        // Rounded first so the colour agrees with the printed value (+3.0 is red, never "-0.0").
         let tone: Vec<_> = tone_db
             .filter(|_| show.tone)
             .map(|t| {
                 let bands = mixer_analyzer::target::TONE_BANDS.iter();
-                bands.zip(t).map(|(&(name, lo, hi), d)| (name, lo, hi, (d * 10.0).round() / 10.0 + 0.0)).collect()
+                bands.zip(t).map(|(&(name, lo, hi), d)| (name, lo, hi, d)).collect()
             })
             .unwrap_or_default();
-        let band_color = |d: f32| (d.abs() >= 3.0).then_some(if d > 0.0 { mocha::RED } else { mocha::BLUE });
+        let band_color = |d: f32| (d.abs() >= mixer_analyzer::target::TONE_HOT_DB).then_some(if d > 0.0 { mocha::RED } else { mocha::BLUE });
         // Bands behind the curves, their labels (below) in front.
         for &(_, lo, hi, d) in &tone {
             if let Some(color) = band_color(d) {
