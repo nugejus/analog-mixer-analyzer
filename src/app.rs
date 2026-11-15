@@ -8,7 +8,7 @@ use mixer_analyzer::{
     feedback::FeedbackDetector,
     levels::{HistPoint, LevelMeter},
     mixers::{ChannelGroup, Control, KNOB_TRAVEL_DEG, MixerFactory, MixerModel, MixerProfile},
-    saved::{self, Saved},
+    saved::{self, Flat, Saved},
     spectrum::{self, DisplayCurve, Frame, HOP, Spectrum},
     speech::{SpeechStats, Summary},
     target::{BANDS_HZ, BELL_OCT, PRESETS, Voice, preset_target},
@@ -39,6 +39,8 @@ struct Recording {
     needed: usize,
     /// Last howl frequency seen during the recording.
     howl: Option<f32>,
+    /// 가운데 분석(안내창의 첫 버튼); false면 지금 세팅 그대로.
+    flat: bool,
 }
 
 impl Recording {
@@ -47,6 +49,7 @@ impl Recording {
             stats: SpeechStats::new(hop_s),
             needed: (seconds as f32 / hop_s).round() as usize,
             howl: None,
+            flat: true,
         }
     }
 
@@ -75,6 +78,8 @@ struct Analysis {
     clipped: bool,
     howl: Option<f32>,
     silent: bool,
+    /// EQ 가운데·저역컷과 COMP 꺼짐에서 잰 분석; false면 지금 세팅 그대로.
+    flat: bool,
 }
 
 /// The analysed spectrum on the display points of the chosen resolution.
@@ -126,6 +131,60 @@ fn saved_goal(s: &Saved, mixer: &str, group: &str, sample_rate: Option<f32>) -> 
         _ => {}
     }
     Goal { db: s.bands_db, notes, restore_dr: Some(s.dynamic_range_db) }
+}
+
+const FLAT_NOTE: &str = "추천 각도는 가운데에서 돌릴 양입니다. 다시 분석할 때도 먼저 가운데로 돌려 주세요. 그다음 미세 조정은 귀로 하세요. 예배 중에는 소리가 바뀌니 사운드 체크 때 하세요.";
+
+/// 분석 전 안내창의 줄: 그룹에 있는 노브만(팩토리 순서라 MID가 여럿이어도 dedup으로 한 번).
+fn flat_lines(group: &ChannelGroup) -> Vec<String> {
+    let (mut eq, mut off) = (vec![], vec![]);
+    for c in &group.controls {
+        match c {
+            Control::HighShelf { .. } => eq.push("HIGH"),
+            Control::Mid { .. } => eq.push("MID"),
+            Control::LowShelf { .. } => eq.push("LOW"),
+            Control::LowCut { .. } => off.push("저역컷 끄기"),
+            Control::Comp => off.push("COMP는 왼쪽 끝(꺼짐)"),
+            Control::Gain { .. } => {}
+        }
+    }
+    eq.dedup();
+    let mut v = vec![format!("{} 노브는 가운데(12시)로", eq.join("·"))];
+    v.extend((!off.is_empty()).then(|| off.join(", ")));
+    v.push("GAIN은 그대로".into());
+    v
+}
+
+const AS_IS_NOTE: &str = "세팅을 저장하거나 지금 노브를 확인할 때는 '지금 세팅 그대로 분석'을 누르세요.";
+
+/// 분석 전 안내창: Some(Some(true)) = 가운데 분석(Enter), Some(Some(false)) = 그대로 분석,
+/// Some(None) = 취소(Esc, 바깥 클릭), None = 열려 있음.
+fn flat_dialog(ctx: &egui::Context, group: &ChannelGroup) -> Option<Option<bool>> {
+    let m = egui::Modal::new(egui::Id::unique("flat_start")).show(ctx, |ui| {
+        ui.set_max_width(360.0);
+        ui.heading("분석 전에 맞춰 주세요");
+        for l in flat_lines(group) {
+            ui.label(l);
+        }
+        for n in [FLAT_NOTE, AS_IS_NOTE] {
+            ui.add(egui::Label::new(egui::RichText::new(n).color(mocha::SUBTEXT0)).wrap());
+        }
+        ui.horizontal_wrapped(|ui| {
+            let flat = ui.button(egui::RichText::new("가운데로 맞췄어요, 분석").strong()).clicked();
+            (flat, ui.button("지금 세팅 그대로 분석").clicked(), ui.button("취소").clicked())
+        })
+        .inner
+    });
+    let (flat, as_is, cancel) = m.inner;
+    let enter = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+    if cancel || m.should_close() {
+        Some(None)
+    } else if as_is {
+        // 포커스된 [그대로] 버튼의 Enter도 클릭이라 Enter(= 가운데)보다 먼저 봅니다.
+        Some(Some(false))
+    } else {
+        (flat || enter).then_some(Some(true))
+    }
 }
 
 /// The `목표` choice: a preset or a saved sound.
@@ -195,6 +254,100 @@ fn advise(a: &Analysis, group: &ChannelGroup, goal: &Goal) -> AdviceSet {
     );
     s.notes.extend(goal.notes.iter().cloned());
     s
+}
+
+/// 마지막 가운데 분석과 그때의 채널(앱을 끄면 사라짐).
+struct LastFlat {
+    mixer: String,
+    group: String,
+    sample_rate: f32,
+    summary: Summary,
+}
+
+impl LastFlat {
+    fn fits(&self, mixer: &str, group: &str, sample_rate: f32) -> bool {
+        (self.mixer.as_str(), self.group.as_str(), self.sample_rate) == (mixer, group, sample_rate)
+    }
+}
+
+const DIFFERS: &str = "오늘 소리 기준 추천이 저장된 노브 위치와 다릅니다(마이크·목소리·자리가 바뀌었을 수 있음). 오늘 소리 기준인 지금 추천을 따르세요.";
+const NEED_FLAT: &str = "가운데에서 분석하면 노브 추천이 나옵니다. 그다음 세팅을 바꾸고 '지금 세팅 그대로 분석'을 누르면 지금 노브 위치를 추정합니다.";
+const UNSURE: &str = "가운데 분석과 소리 차이가 너무 커서(노브 하나가 끝까지 돌아간 것으로 나옴) 지금 노브 위치를 추정하지 않았습니다. 말하는 사람이나 마이크가 바뀌었다면 가운데 분석부터 다시 하세요(두 분석은 같은 사람·같은 마이크로). 이대로 저장하면 소리만 쓰입니다.";
+const NO_FLAT_SAVED: &str = "가운데 분석이 없어 노브 위치는 저장하지 않았습니다(소리만 저장).";
+
+/// 노브 줄에 보일 것(spec 규칙 1–5).
+enum KnobView {
+    /// 1: 가운데 분석의 추천(저장된 노브 위치와 다르면 노트 하나 더).
+    Advice(AdviceSet),
+    /// 2: 고른 저장 세팅의 노브 위치.
+    Stored(Vec<Advice>),
+    /// 3: 그대로 분석과 last_flat으로 추정한 지금 노브 위치.
+    Estimate(Vec<Advice>),
+    /// 4: 노브 이름과 노트 하나.
+    Names(String),
+    /// 5: 분석 없음.
+    None,
+}
+
+/// 규칙 1–5. 2와 3의 GAIN은 ✓이고 엔진 노트는 버립니다(`knob_positions`).
+fn knob_view(
+    analysis: Option<&Analysis>,
+    saved: Option<&Saved>,
+    last_flat: Option<&LastFlat>,
+    mixer: &str,
+    group: &ChannelGroup,
+    goal: &Goal,
+) -> KnobView {
+    let stored = saved.filter(|s| s.mixer == mixer && s.group == group.label).and_then(|s| {
+        let f = s.flat.as_ref()?;
+        let flat = advice::neutral_summary(f.bands_db, f.dynamic_range_db);
+        advice::knob_positions(group, &flat, &s.bands_db, s.dynamic_range_db)
+    });
+    let Some(a) = analysis else {
+        return stored.map_or(KnobView::None, KnobView::Stored);
+    };
+    if a.flat {
+        let mut s = advise(a, group, goal);
+        if stored.is_some_and(|k| advice::knobs_differ(&s.knobs, &k)) {
+            s.notes.push(DIFFERS.into());
+        }
+        return KnobView::Advice(s);
+    }
+    if let Some(k) = stored {
+        return KnobView::Stored(k);
+    }
+    match (last_flat.filter(|l| l.fits(mixer, group.label, a.sample_rate)), &a.summary) {
+        // 말소리 부족·낮은 샘플레이트는 규칙 4처럼 노브 이름과 엔진의 그 노트로 알립니다(첫 노트가 그 이유).
+        _ if a.summary.is_none() || a.sample_rate < MIN_RATE => KnobView::Names(advise(a, group, goal).notes.remove(0)),
+        (Some(l), Some(s)) => advice::knob_positions(group, &l.summary, &s.bands_db, s.dynamic_range_db)
+            .map_or_else(|| KnobView::Names(UNSURE.into()), KnobView::Estimate),
+        _ => KnobView::Names(NEED_FLAT.into()),
+    }
+}
+
+/// 상태 줄의 과부하 의심: 노브 줄(규칙 2·3은 엔진 노트를 버림)과 상관없이 마지막 분석의 엔진 결과.
+fn overloaded(a: Option<&Analysis>, group: &ChannelGroup, goal: &Goal) -> bool {
+    a.is_some_and(|a| advise(a, group, goal).notes.iter().any(|n| n == advice::OVERLOAD))
+}
+
+/// 노브 줄 머리글.
+fn header(v: &KnobView) -> Option<&'static str> {
+    match v {
+        KnobView::Advice(_) => Some("추천: 가운데(12시)에서 돌릴 양"),
+        KnobView::Stored(_) => Some("저장된 세팅: 가운데(12시)에서 돌릴 양"),
+        KnobView::Estimate(_) => Some("지금 노브 추정: 가운데(12시)에서 돌린 양"),
+        KnobView::Names(_) | KnobView::None => None,
+    }
+}
+
+/// 이 소리와 함께 저장할 가운데 소리: 가운데 분석이면 자신, 그대로 분석이면 같은 채널·샘플레이트의 last_flat.
+fn flat_for_save(a: &Analysis, last_flat: Option<&LastFlat>, mixer: &str, group: &str) -> Option<Flat> {
+    let s = if a.flat {
+        a.summary.as_ref()?
+    } else {
+        &last_flat.filter(|l| l.fits(mixer, group, a.sample_rate))?.summary
+    };
+    Some(Flat { dynamic_range_db: s.dynamic_range_db, bands_db: s.bands_db })
 }
 
 /// An open input and the analysis state built for its sample rate and channel count.
@@ -304,6 +457,8 @@ pub struct App {
     confirm_delete: bool,
     save_error: Option<String>,
     rec_seconds: u32,
+    /// `분석` was pressed: the flat-start dialog is open.
+    flat_start: bool,
     /// Index into `SMOOTHING`.
     smooth: usize,
     /// Index into `RESOLUTIONS`.
@@ -311,7 +466,11 @@ pub struct App {
     /// Index into `FREQ_SMOOTH`.
     freq_smooth: usize,
     analysis: Option<Analysis>,
-    advice: Option<AdviceSet>,
+    last_flat: Option<LastFlat>,
+    /// Rebuilt by `readvise`.
+    view: KnobView,
+    /// 과부하 의심; rebuilt by `readvise`.
+    overload: bool,
     show: Show,
     update: Update,
 }
@@ -375,11 +534,14 @@ impl App {
             voice: Voice::Male,
             pick: Pick::Preset(0),
             rec_seconds: 20,
+            flat_start: false,
             smooth: 1,
             res: 2,
             freq_smooth: 3,
             analysis: None,
-            advice: None,
+            last_flat: None,
+            view: KnobView::None,
+            overload: false,
             show: Show::default(),
         }
     }
@@ -392,7 +554,13 @@ impl App {
                 saved_goal(&self.saved[i], &mixer_name(&self.profile), group.label, self.analysis.as_ref().map(|a| a.sample_rate))
             }
         };
-        self.advice = self.analysis.as_ref().map(|a| advise(a, group, &self.goal));
+        let saved = match self.pick {
+            Pick::Saved(i) => Some(&self.saved[i]),
+            Pick::Preset(_) => None,
+        };
+        let mixer = mixer_name(&self.profile);
+        self.view = knob_view(self.analysis.as_ref(), saved, self.last_flat.as_ref(), &mixer, group, &self.goal);
+        self.overload = overloaded(self.analysis.as_ref(), group, &self.goal);
     }
 
     /// Writes the saved list; a failure shows in red under 안내 and the list stays in memory.
@@ -495,7 +663,8 @@ impl App {
                 }
             }
         }
-        let summary = self.analysis.as_ref().filter(|a| a.sample_rate >= MIN_RATE).and_then(|a| a.summary.as_ref());
+        let analysis = self.analysis.as_ref().filter(|a| a.sample_rate >= MIN_RATE);
+        let summary = analysis.and_then(|a| a.summary.as_ref());
         let Some(name) = &mut self.naming else {
             if ui.add_enabled(summary.is_some(), egui::Button::new("이 소리 저장")).clicked() {
                 self.naming = Some(String::new());
@@ -508,17 +677,24 @@ impl App {
         if ui.button("취소").clicked() {
             self.naming = None;
         }
-        if let (true, Some(s)) = (save, summary) {
+        if let (true, Some(a), Some(s)) = (save, analysis, summary) {
+            let (mixer, group) = (mixer_name(&self.profile), self.profile.groups[self.group].label);
+            let flat = flat_for_save(a, self.last_flat.as_ref(), &mixer, group);
+            let no_flat = flat.is_none();
             let s = Saved {
                 name,
-                mixer: mixer_name(&self.profile),
-                group: self.profile.groups[self.group].label.to_owned(),
+                mixer,
+                group: group.to_owned(),
                 dynamic_range_db: s.dynamic_range_db,
                 bands_db: s.bands_db,
                 sample_rate: self.analysis.as_ref().map(|a| a.sample_rate.round() as u32),
+                flat,
             };
             saved::upsert(&mut self.saved, s);
             self.persist();
+            if no_flat && self.save_error.is_none() {
+                self.save_error = Some(NO_FLAT_SAVED.into());
+            }
             self.naming = None;
             self.readvise();
         }
@@ -613,7 +789,7 @@ impl App {
             Pick::Preset(i) => PRESETS[i].when.to_owned(),
             Pick::Saved(i) => {
                 let s = &self.saved[i];
-                format!("저장: {} {} — 저장할 때와 같은 사람·같은 마이크로 분석하세요.", s.mixer, s.group)
+                format!("저장: {} {} — 저장할 때와 같은 사람이 말할 때 분석하세요.", s.mixer, s.group)
             }
         };
         ui.add(egui::Label::new(egui::RichText::new(when).color(mocha::SUBTEXT0)).wrap_mode(egui::TextWrapMode::Wrap));
@@ -631,6 +807,18 @@ impl App {
         }
         ui.horizontal_wrapped(|ui| self.save_controls(ui));
         ui.separator();
+        // 버튼보다 먼저: [분석]을 누른 Enter가 같은 프레임에 안내창까지 확인하지 않게 합니다.
+        if self.flat_start {
+            let r = flat_dialog(ui.ctx(), &self.profile.groups[self.group]);
+            self.flat_start = r.is_none();
+            // 그사이 입력장치가 안 열리면(Err) 녹음하지 않고 닫기만 합니다.
+            if let Some(Some(flat)) = r
+                && let Ok(live) = &mut self.live
+            {
+                live.curve.reset_peak();
+                live.rec = Some(Recording { flat, ..Recording::new(self.rec_seconds, HOP as f32 / live.input.sample_rate) });
+            }
+        }
         let recording = self.live.as_ref().is_ok_and(|l| l.rec.is_some());
         ui.horizontal(|ui| {
             ui.label("녹음");
@@ -649,15 +837,11 @@ impl App {
             .clicked()
             && let Ok(live) = &mut self.live
         {
-            live.rec = if recording {
-                None
+            if recording {
+                live.rec = None;
             } else {
-                live.curve.reset_peak();
-                Some(Recording::new(
-                    self.rec_seconds,
-                    HOP as f32 / live.input.sample_rate,
-                ))
-            };
+                self.flat_start = true;
+            }
         }
         ui.separator();
         ui.label("실시간 선");
@@ -807,7 +991,7 @@ struct Span {
     mark: Option<f32>,
 }
 
-fn knob_spans(group: &ChannelGroup, advice: Option<&AdviceSet>) -> Vec<Span> {
+fn knob_spans(group: &ChannelGroup, knobs: Option<&[Advice]>) -> Vec<Span> {
     advice::labels(group)
         .into_iter()
         .filter(|k| !k.label.starts_with("FREQ"))
@@ -822,8 +1006,8 @@ fn knob_spans(group: &ChannelGroup, advice: Option<&AdviceSet>) -> Vec<Span> {
                 _ => return None,
             };
             let freq = k.label.replacen("MID", "FREQ", 1);
-            let mark = advice
-                .and_then(|a| a.knobs.iter().find(|a| a.label == freq))
+            let mark = knobs
+                .and_then(|k| k.iter().find(|a| a.label == freq))
                 .and_then(|a| match a.action {
                     Action::SetFreq { hz } => Some(hz),
                     _ => None,
@@ -1016,7 +1200,6 @@ fn caption(k: &Advice) -> Vec<(String, Color32)> {
         Action::Ok if k.label.starts_with("FREQ") => one("✓ 그대로".into(), mocha::GREEN),
         Action::Ok => one("✓".into(), mocha::GREEN),
         Action::SwitchOn => one("켜기 권장".into(), mocha::SAPPHIRE),
-        Action::SwitchOff => one("끄기 권장".into(), mocha::SAPPHIRE),
         Action::SetFreq { hz } => one(format!("{} 눈금에", fmt_hz(hz)), mocha::YELLOW),
         Action::Rotate { degrees, db } => {
             let dir = if degrees > 0.0 {
@@ -1024,12 +1207,19 @@ fn caption(k: &Advice) -> Vec<(String, Color32)> {
             } else {
                 "반시계"
             };
-            let mut v = one(format!("{dir} {:.0}°", degrees.abs()), mocha::YELLOW);
-            // COMP의 db는 의미 없는 0입니다.
-            if k.control != Control::Comp {
-                v.push((format!("(≈{db:+.0}dB)"), mocha::YELLOW));
+            match k.control {
+                // COMP는 왼쪽 끝(꺼짐)에서 재고, db는 의미 없는 0입니다.
+                Control::Comp => one(format!("왼쪽 끝에서 {dir} {:.0}°", degrees.abs()), mocha::YELLOW),
+                _ => {
+                    let mut v = one(format!("{dir} {:.0}°", degrees.abs()), mocha::YELLOW);
+                    v.push((format!("(≈{db:+.0}dB)"), mocha::YELLOW));
+                    // GAIN은 가운데가 아니라 지금 위치에서 잽니다.
+                    if let Control::Gain { .. } = k.control {
+                        v.push(("(지금 위치에서)".into(), mocha::SUBTEXT0));
+                    }
+                    v
+                }
             }
-            v
         }
     }
 }
@@ -1058,17 +1248,19 @@ fn dial(ui: &mut egui::Ui, k: &Advice) {
     }
     p.circle_filled(c, KNOB_R, mocha::SURFACE0);
     p.circle_stroke(c, KNOB_R, Stroke::new(1.5, mocha::OVERLAY1));
+    // COMP는 왼쪽 끝(꺼짐)에서, 나머지는 12시에서 잽니다.
+    let start = if k.control == Control::Comp { -150.0 } else { 0.0 };
     match (k.action.clone(), k.control) {
         (Action::Rotate { degrees, .. }, _) => {
-            pointer(0.0, mocha::TEXT);
+            pointer(start, mocha::TEXT);
             let ra = KNOB_R + 7.0;
             let arc: Vec<Pos2> = (0..=24)
-                .map(|i| at(c, ra, degrees * i as f32 / 24.0))
+                .map(|i| at(c, ra, start + degrees * i as f32 / 24.0))
                 .collect();
             p.add(Shape::line(arc, Stroke::new(2.5, mocha::YELLOW)));
-            let a = degrees.to_radians();
+            let a = (start + degrees).to_radians();
             let (e, t, n) = (
-                at(c, ra, degrees),
+                at(c, ra, start + degrees),
                 degrees.signum() * vec2(a.cos(), a.sin()),
                 vec2(a.sin(), -a.cos()),
             );
@@ -1089,7 +1281,7 @@ fn dial(ui: &mut egui::Ui, k: &Advice) {
         }
         _ if k.label.starts_with("FREQ") => {} // 지금 눈금은 모르므로 포인터 없음
         _ => {
-            pointer(0.0, mocha::SUBTEXT0);
+            pointer(start, mocha::SUBTEXT0);
         }
     }
 }
@@ -1126,16 +1318,28 @@ impl eframe::App for App {
                 clipped: live.levels.clipped_within(n),
                 howl: rec.howl,
                 silent: live.silent_for(n),
+                flat: rec.flat,
             })
         });
-        if finished.is_some() {
-            self.analysis = finished;
+        if let Some(a) = finished {
+            if let (true, Some(s)) = (a.flat, &a.summary) {
+                let (mixer, group) = (mixer_name(&self.profile), self.profile.groups[self.group].label.to_owned());
+                self.last_flat = Some(LastFlat { mixer, group, sample_rate: a.sample_rate, summary: s.clone() });
+            }
+            self.analysis = Some(a);
             self.readvise();
         }
         egui::Panel::left("controls").resizable(false).exact_size(SIDE_W).show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| self.side_panel(ui, frame))
         });
-        let (advice, live) = (self.advice.as_ref(), self.live.as_ref().ok());
+        let live = self.live.as_ref().ok();
+        let names = advice::labels(&self.profile.groups[self.group]);
+        let (knobs, notes): (Option<&[Advice]>, &[String]) = match &self.view {
+            KnobView::Advice(a) => (Some(&a.knobs), &a.notes),
+            KnobView::Stored(k) | KnobView::Estimate(k) => (Some(k), &[]),
+            KnobView::Names(n) => (Some(&names), std::slice::from_ref(n)),
+            KnobView::None => (None, &[]),
+        };
         let summary = self.analysis.as_ref().and_then(|a| a.summary.as_ref());
         egui::Panel::bottom("advice").show(ui, |ui| {
             let rec = live.and_then(|l| l.rec.as_ref());
@@ -1147,15 +1351,20 @@ impl eframe::App for App {
                 );
                 ui.add(egui::ProgressBar::new(r.progress()).text(text));
             }
-            let noted = advice.is_some_and(|a| a.notes.iter().any(|n| n == advice::NO_INPUT));
+            let noted = notes.iter().any(|n| n == advice::NO_INPUT);
             if !noted && live.is_some_and(Live::silent) {
                 ui.colored_label(mocha::RED, advice::NO_INPUT);
             }
-            if let Some(a) = advice {
-                ui.strong(summary.map_or("노브 추천".into(), |s| {
-                    format!("노브 추천 — 말소리 {:.1}초 분석", s.active_seconds)
-                }));
-                knob_row(ui, &a.knobs);
+            if let Some(k) = knobs {
+                ui.horizontal(|ui| {
+                    ui.strong(summary.map_or("노브 추천".into(), |s| {
+                        format!("노브 추천 — 말소리 {:.1}초 분석", s.active_seconds)
+                    }));
+                    if let Some(h) = header(&self.view) {
+                        ui.label(h);
+                    }
+                });
+                knob_row(ui, k);
             } else if rec.is_none() {
                 ui.label(format!(
                     "[분석]을 누르고 {}초 동안 평소처럼 말씀하세요.",
@@ -1164,7 +1373,7 @@ impl eframe::App for App {
             }
             ui.separator();
             ui.strong("안내");
-            for n in advice.iter().flat_map(|a| &a.notes) {
+            for n in notes {
                 ui.label(n);
             }
             if let Some(e) = &self.save_error {
@@ -1207,16 +1416,12 @@ impl eframe::App for App {
                     (Some(a), Some(s)) if self.show.bumps => spectrum::peaks(&s.bin_power, a.sample_rate, per_oct),
                     _ => Vec::new(),
                 };
-                let spans = knob_spans(&self.profile.groups[self.group], advice);
+                let spans = knob_spans(&self.profile.groups[self.group], knobs);
                 let result = self.analysis.as_ref().and_then(|a| result_db(a, per_oct, FREQ_SMOOTH[self.freq_smooth].1));
                 spectrum_plot(ui, &live.curve, result.as_deref(), target, tone, &bumps, per_oct, &self.show, &spans, h * 0.6);
                 ui.strong("레벨/디스토션 기록 (최근 30초)");
                 level_plot(ui, live.levels.history(), h * 0.4);
-                status_line(
-                    ui,
-                    live,
-                    advice.is_some_and(|a| a.notes.iter().any(|n| n == advice::OVERLOAD)),
-                );
+                status_line(ui, live, self.overload);
             }
             Err(e) => {
                 ui.strong("실시간 주파수 그래프");
@@ -1233,7 +1438,7 @@ mod tests {
     use mixer_analyzer::target::{hpf_db, ltass_db};
 
     fn spans(m: MixerModel, a: Option<&AdviceSet>) -> Vec<(String, f32, f32, Option<f32>)> {
-        knob_spans(&MixerFactory::create(m).groups[0], a).into_iter().map(|s| (s.label, s.lo, s.hi, s.mark)).collect()
+        knob_spans(&MixerFactory::create(m).groups[0], a.map(|a| &a.knobs[..])).into_iter().map(|s| (s.label, s.lo, s.hi, s.mark)).collect()
     }
     #[test]
     fn knob_spans_profx22v3() {
@@ -1262,6 +1467,19 @@ mod tests {
         let get = |l: &str| s.iter().find(|x| x.0 == l).unwrap().clone();
         assert_eq!(get("MID 1"), ("MID 1".into(), 400.0, 8_000.0, None));
         assert_eq!(get("MID 2"), ("MID 2".into(), 80.0, 2_000.0, Some(200.0)));
+    }
+
+    #[test]
+    fn flat_lines_follow_group() {
+        let lines = |m, i: usize| flat_lines(&MixerFactory::create(m).groups[i]);
+        assert_eq!(lines(MixerModel::MackieProFx22v3, 0),
+                   ["HIGH·MID·LOW 노브는 가운데(12시)로", "저역컷 끄기, COMP는 왼쪽 끝(꺼짐)", "GAIN은 그대로"]);
+        for m in [MixerModel::YamahaMg06x, MixerModel::AhZed6] {
+            assert_eq!(lines(m, 0), ["HIGH·LOW 노브는 가운데(12시)로", "저역컷 끄기", "GAIN은 그대로"]);
+        }
+        assert_eq!(lines(MixerModel::SoundcraftEpm, 0), ["HIGH·MID·LOW 노브는 가운데(12시)로", "GAIN은 그대로"]);
+        assert_eq!(lines(MixerModel::SoundcraftSignature22, 0),
+                   ["HIGH·MID·LOW 노브는 가운데(12시)로", "저역컷 끄기", "GAIN은 그대로"]);
     }
 
     #[test]
@@ -1307,18 +1525,18 @@ mod tests {
                     db: -10.0
                 }
             ),
-            ["반시계 50°", "(≈-10dB)"]
+            ["반시계 50°", "(≈-10dB)", "(지금 위치에서)"]
         );
         assert_eq!(
             text(
                 "COMP",
                 Control::Comp,
                 Action::Rotate {
-                    degrees: -30.0,
+                    degrees: 30.0,
                     db: 0.0
                 }
             ),
-            ["반시계 30°"]
+            ["왼쪽 끝에서 시계방향 30°"]
         );
         assert_eq!(
             text("FREQ", mid, Action::SetFreq { hz: 400.0 }),
@@ -1333,14 +1551,6 @@ mod tests {
                 Action::SwitchOn
             ),
             ["켜기 권장"]
-        );
-        assert_eq!(
-            text(
-                "저역컷 100Hz",
-                Control::LowCut { hz: 100.0 },
-                Action::SwitchOff
-            ),
-            ["끄기 권장"]
         );
         assert_eq!(text("GAIN", gain, Action::Wait), ["—"]);
     }
@@ -1404,6 +1614,7 @@ mod tests {
             clipped: false,
             howl: None,
             silent: false,
+            flat: true,
         };
         let g = &MixerFactory::create(MixerModel::MackieProFx22v3).groups[0];
         let s = advise(&a, g, &preset_goal(0, Voice::Male, g));
@@ -1420,7 +1631,7 @@ mod tests {
         let a = Analysis {
             summary: Some(Summary { bands_db: [0.0; 25], bin_power, peak_db: -12.0, rms_db: -30.0, noise_floor_db: -80.0,
                                     snr_db: 50.0, dynamic_range_db: 10.0, crest_db: 18.0, active_seconds: 10.0 }),
-            sample_rate: sr, seconds: 20, clipped: false, howl: None, silent: false,
+            sample_rate: sr, seconds: 20, clipped: false, howl: None, silent: false, flat: true,
         };
         let d = result_db(&a, 48, 0).unwrap();
         let freqs = spectrum::display_freqs(48);
@@ -1449,6 +1660,7 @@ mod tests {
             clipped: false,
             howl: None,
             silent: false,
+            flat: true,
         }
     }
 
@@ -1495,6 +1707,10 @@ mod tests {
         match knob(&s, "HIGH 12kHz") { Action::Ok => {}, Action::Rotate { db, .. } => assert!(db <= 4.0, "{db}"), x => panic!("{x:?}") }
         assert!(s.notes.iter().any(|n| n == "이 채널에는 300Hz 부근을 바꿀 노브가 없어 그 부분은 빼고 맞춥니다."));
     }
+    #[test] fn preset_low_cut_without_switch_is_a_note() {
+        let g = &MixerFactory::create(MixerModel::SoundcraftEpm).groups[0];
+        assert_eq!(preset_goal(3, Voice::Male, g).notes, ["이 채널에는 100Hz 부근을 바꿀 노브가 없어 그 부분은 빼고 맞춥니다."]);
+    }
     #[test] fn every_preset_on_every_group_is_finite() {
         for m in MixerModel::ALL { for g in &MixerFactory::create(m).groups { for i in 0..PRESETS.len() {
             for k in advise(&natural(|_| 0.0), g, &preset_goal(i, Voice::Female, g)).knobs {
@@ -1504,7 +1720,7 @@ mod tests {
     }
 
     #[test] fn saved_goal_flags_other_channel() {
-        let s = Saved { name: "x".into(), mixer: "Mackie ProFX22v3 (2019, LEVEL SET LED)".into(), group: "CH1-12 (COMP)".into(), dynamic_range_db: 9.0, bands_db: [0.0; 25], sample_rate: Some(48_000) };
+        let s = Saved { name: "x".into(), mixer: "Mackie ProFX22v3 (2019, LEVEL SET LED)".into(), group: "CH1-12 (COMP)".into(), dynamic_range_db: 9.0, bands_db: [0.0; 25], sample_rate: Some(48_000), flat: None };
         let same = saved_goal(&s, &s.mixer, &s.group, Some(48_000.0));
         assert!(same.notes.is_empty() && same.restore_dr == Some(9.0) && same.db == s.bands_db);
         let other = saved_goal(&s, &s.mixer, "CH13-14", Some(48_000.0));
@@ -1524,17 +1740,17 @@ mod tests {
         assert!(saved_goal(&s, &s.mixer.clone(), "CH15-20 (스테레오 마이크)", Some(48_000.0)).notes.is_empty());
         assert_eq!(saved_goal(&s, "Mackie ProFX22 (1세대, 2011)", "CH15-20 (스테레오 마이크)", Some(48_000.0)).notes.len(), 1);
     }
-    #[test] fn restore_from_saved_says_switch_off() {
+    #[test] fn restore_from_saved_says_switch_on() {
         let g = &MixerFactory::create(MixerModel::MackieProFx22v3).groups[0];
-        let saved_now = natural(|_| 0.0); // 저장 때: 스위치 꺼짐
+        let saved_now = natural(|f| hpf_db(100.0, f)); // 저장 때: 스위치 켜짐
         let s = Saved { name: "x".into(), mixer: "m".into(), group: g.label.into(),
-                        dynamic_range_db: 10.0, bands_db: saved_now.summary.as_ref().unwrap().bands_db, sample_rate: Some(48_000) };
-        let a = advise(&natural(|f| hpf_db(100.0, f)), g, &saved_goal(&s, "m", g.label, Some(48_000.0))); // 지금: 켜짐
-        assert_eq!(knob(&a, "저역컷 100Hz"), Action::SwitchOff);
+                        dynamic_range_db: 10.0, bands_db: saved_now.summary.as_ref().unwrap().bands_db, sample_rate: Some(48_000), flat: None };
+        let a = advise(&natural(|_| 0.0), g, &saved_goal(&s, "m", g.label, Some(48_000.0))); // 지금: 꺼짐(가운데에서 시작)
+        assert_eq!(knob(&a, "저역컷 100Hz"), Action::SwitchOn);
     }
 
     fn saved_sample(name: &str) -> Saved {
-        Saved { name: name.into(), mixer: "m".into(), group: "g".into(), dynamic_range_db: 9.0, bands_db: [0.0; 25], sample_rate: Some(48_000) }
+        Saved { name: name.into(), mixer: "m".into(), group: "g".into(), dynamic_range_db: 9.0, bands_db: [0.0; 25], sample_rate: Some(48_000), flat: None }
     }
     #[test] fn repick_follows_name() {
         let (a, b, c) = (saved_sample("a"), saved_sample("b"), saved_sample("c"));
@@ -1561,5 +1777,141 @@ mod tests {
         assert_eq!(write_list(None, false, &[]), Err("저장 폴더를 찾을 수 없습니다".to_owned()));
         assert!(write_list(Some(d.as_path()), false, &[saved_sample("x")]).is_ok());
         std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    fn act(k: &[Advice], l: &str) -> Action {
+        k.iter().find(|k| k.label == l).unwrap().action.clone()
+    }
+    fn last_flat(mixer: &str, group: &str, a: &Analysis) -> LastFlat {
+        LastFlat { mixer: mixer.into(), group: group.into(), sample_rate: a.sample_rate, summary: a.summary.clone().unwrap() }
+    }
+    fn as_is(a: Analysis) -> Analysis {
+        Analysis { flat: false, ..a }
+    }
+    /// ProFX22v3 CH1-12에서 가운데 소리(남성 LTASS)로 시작해 저역컷만 켜고 저장한 세팅.
+    fn knob_setup() -> (MixerProfile, String, Saved) {
+        let p = MixerFactory::create(MixerModel::MackieProFx22v3);
+        let m = mixer_name(&p);
+        let flat = natural(|_| 0.0).summary.unwrap();
+        let done = natural(|f| hpf_db(100.0, f)).summary.unwrap();
+        let s = Saved { mixer: m.clone(), group: p.groups[0].label.into(), dynamic_range_db: done.dynamic_range_db, bands_db: done.bands_db,
+                        flat: Some(Flat { dynamic_range_db: flat.dynamic_range_db, bands_db: flat.bands_db }), ..saved_sample("x") };
+        (p, m, s)
+    }
+    #[test] fn knob_view_rules() {
+        let (p, m, s) = knob_setup();
+        let g = &p.groups[0];
+        let view = |a: Option<&Analysis>, saved: Option<&Saved>, lf: Option<&LastFlat>| {
+            let goal = saved.map_or_else(|| preset_goal(0, Voice::Male, g), |s| saved_goal(s, &m, g.label, Some(48_000.0)));
+            knob_view(a, saved, lf, &m, g, &goal)
+        };
+        let (flat, done) = (natural(|_| 0.0), as_is(natural(|f| hpf_db(100.0, f))));
+        let lf = last_flat(&m, g.label, &flat);
+        let old = Saved { flat: None, ..s.clone() };
+        let names = "가운데에서 분석하면 노브 추천이 나옵니다. 그다음 세팅을 바꾸고 '지금 세팅 그대로 분석'을 누르면 지금 노브 위치를 추정합니다.";
+        // 1: 가운데 분석은 저장된 노브 위치가 있어도 오늘 소리 기준 추천.
+        let v = view(Some(&flat), Some(&s), Some(&lf));
+        assert!(matches!(&v, KnobView::Advice(a) if knob(a, "저역컷 100Hz") == Action::SwitchOn));
+        assert_eq!(header(&v), Some("추천: 가운데(12시)에서 돌릴 양"));
+        // 2: 분석이 없거나 그대로 분석이면 저장된 노브 위치(GAIN ✓). 다른 믹서에서 저장했으면 아님.
+        for a in [None, Some(&done)] {
+            let v = view(a, Some(&s), Some(&lf));
+            let KnobView::Stored(k) = &v else { panic!("rule 2") };
+            assert_eq!((act(k, "저역컷 100Hz"), act(k, "GAIN")), (Action::SwitchOn, Action::Ok));
+            assert_eq!(header(&v), Some("저장된 세팅: 가운데(12시)에서 돌릴 양"));
+        }
+        let other_mixer = Saved { mixer: "Mackie ProFX22 (1세대, 2011)".into(), ..s.clone() };
+        assert!(matches!(view(None, Some(&other_mixer), None), KnobView::None));
+        assert!(matches!(view(Some(&done), Some(&other_mixer), Some(&lf)), KnobView::Estimate(_)));
+        // 3: 그대로 분석 + 같은 믹서·그룹·샘플레이트의 last_flat이면 지금 노브 추정. 옛 저장(노브 위치 없음)도 여기로.
+        for saved in [None, Some(&old)] {
+            let v = view(Some(&done), saved, Some(&lf));
+            let KnobView::Estimate(k) = &v else { panic!("rule 3") };
+            assert_eq!((act(k, "저역컷 100Hz"), act(k, "GAIN")), (Action::SwitchOn, Action::Ok));
+            assert_eq!(header(&v), Some("지금 노브 추정: 가운데(12시)에서 돌린 양"));
+        }
+        // 4: 그 밖의 그대로 분석: last_flat 없음, 다른 그룹, 다른 샘플레이트.
+        let other_group = last_flat(&m, p.groups[1].label, &flat);
+        let other_rate = LastFlat { sample_rate: 44_100.0, ..last_flat(&m, g.label, &flat) };
+        for lf in [None, Some(&other_group), Some(&other_rate)] {
+            let v = view(Some(&done), None, lf);
+            assert!(matches!(&v, KnobView::Names(n) if n == names));
+            assert_eq!(header(&v), None);
+        }
+        // 그대로 분석이 말소리 부족이나 낮은 샘플레이트면 규칙 4처럼 그 노트만(가운데 추천 머리글 없음).
+        let short = as_is(Analysis { summary: None, ..natural(|_| 0.0) });
+        let low_rate = Analysis { sample_rate: 32_000.0, ..as_is(natural(|_| 0.0)) };
+        for (a, why) in [(&short, "말소리가 부족합니다"), (&low_rate, "입력 샘플레이트가 32kHz")] {
+            let v = view(Some(a), None, Some(&lf));
+            assert!(matches!(&v, KnobView::Names(n) if n.starts_with(why)), "{why}");
+            assert_eq!(header(&v), None);
+        }
+        // 3이어도 노브가 끝까지 가면(그사이 말하는 사람·마이크가 바뀜) 추정하지 않습니다.
+        let far = as_is(natural(|f| 20.0 * advice::Shape::LowShelf(80.0).response(f)));
+        assert!(matches!(view(Some(&far), None, Some(&lf)), KnobView::Names(n) if n == UNSURE));
+        // 5: 분석 없음(옛 저장도).
+        for saved in [None, Some(&old)] {
+            let v = view(None, saved, Some(&lf));
+            assert!(matches!(v, KnobView::None));
+            assert_eq!(header(&v), None);
+        }
+    }
+    #[test] fn overload_dot_follows_the_analysis() {
+        let (p, m, _) = knob_setup();
+        let g = &p.groups[0];
+        let goal = preset_goal(0, Voice::Male, g);
+        let flat = natural(|_| 0.0);
+        let done = as_is(natural(|f| hpf_db(100.0, f)));
+        let done = Analysis { summary: done.summary.map(|s| Summary { crest_db: 7.0, peak_db: -10.0, ..s }), ..done };
+        // 규칙 3(지금 노브 추정)은 엔진 노트를 버려도 상태 줄의 과부하 의심은 켜집니다.
+        assert!(matches!(knob_view(Some(&done), None, Some(&last_flat(&m, g.label, &flat)), &m, g, &goal), KnobView::Estimate(_)));
+        assert!(overloaded(Some(&done), g, &goal));
+        assert!(!overloaded(Some(&flat), g, &goal));
+        assert!(!overloaded(None, g, &goal));
+    }
+    #[test] fn dialog_enter_on_focused_as_is_button() {
+        let g = &MixerFactory::create(MixerModel::MackieProFx22v3).groups[0];
+        let key = |key| vec![egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }];
+        let last = |frames: Vec<Vec<egui::Event>>| {
+            let ctx = egui::Context::default();
+            let mut r = None;
+            for events in frames {
+                ctx.run_ui(egui::RawInput { events, ..Default::default() }, |ui| r = flat_dialog(ui.ctx(), g)).textures_delta.clear();
+            }
+            r
+        };
+        // 포커스가 없으면 Enter는 가운데 분석.
+        assert_eq!(last(vec![vec![], key(egui::Key::Enter)]), Some(Some(true)));
+        // Tab 두 번이면 [지금 세팅 그대로 분석]에 포커스: 그 Enter는 버튼 클릭이라 그대로 분석입니다.
+        let tab = || key(egui::Key::Tab);
+        assert_eq!(last(vec![vec![], tab(), tab(), key(egui::Key::Enter)]), Some(Some(false)));
+    }
+    #[test] fn difference_note_only_when_different() {
+        let (p, m, s) = knob_setup();
+        let g = &p.groups[0];
+        let notes = |a: &Analysis, s: &Saved| match knob_view(Some(a), Some(s), None, &m, g, &saved_goal(s, &m, g.label, Some(48_000.0))) {
+            KnobView::Advice(a) => a.notes,
+            _ => panic!("rule 1"),
+        };
+        let note = "오늘 소리 기준 추천이 저장된 노브 위치와 다릅니다(마이크·목소리·자리가 바뀌었을 수 있음). 오늘 소리 기준인 지금 추천을 따르세요.";
+        let darker = || natural(|f| -6.0 * advice::Shape::HighShelf(12_000.0).response(f)); // 오늘은 고역이 6 dB 어두움
+        assert!(notes(&natural(|_| 0.0), &s).is_empty());
+        assert_eq!(notes(&darker(), &s), [note]);
+        // 다른 그룹에서 저장했거나 노브 위치가 없으면 비교하지 않습니다.
+        let other = Saved { group: p.groups[1].label.into(), ..s.clone() };
+        assert!(!notes(&darker(), &other).iter().any(|n| n == note));
+        assert!(notes(&darker(), &Saved { flat: None, ..s }).is_empty());
+    }
+    #[test] fn flat_for_save_cases() {
+        let (m, g) = ("m", "g");
+        let flat = natural(|_| 0.0);
+        let lf = last_flat(m, g, &natural(|_| 3.0));
+        let of = |s: &Summary| Some(Flat { dynamic_range_db: s.dynamic_range_db, bands_db: s.bands_db });
+        assert_eq!(flat_for_save(&flat, Some(&lf), m, g), of(flat.summary.as_ref().unwrap()));
+        let done = as_is(natural(|f| hpf_db(100.0, f)));
+        assert_eq!(flat_for_save(&done, Some(&lf), m, g), of(&lf.summary));
+        assert_eq!(flat_for_save(&done, Some(&lf), m, "other"), None);
+        assert_eq!(flat_for_save(&done, None, m, g), None);
+        assert_eq!(flat_for_save(&Analysis { sample_rate: 44_100.0, ..done }, Some(&lf), m, g), None);
     }
 }

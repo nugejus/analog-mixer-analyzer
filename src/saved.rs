@@ -1,4 +1,5 @@
-//! Expert sounds saved for restore: one tab-separated line each in `saved.tsv`.
+//! Expert sounds saved for restore, with the centre (flat-start) sound they were made from when known:
+//! one tab-separated line each in `saved.tsv`.
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -13,6 +14,14 @@ pub struct Saved {
     pub bands_db: [f32; 25],
     /// Analysis sample rate (Hz); `None` for sounds saved by 0.3.1 and older.
     pub sample_rate: Option<u32>,
+    /// The centre analysis (EQ at 12 o'clock, low cut and COMP off) on the same channel; `None` when unknown or saved by 0.3.x.
+    pub flat: Option<Flat>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Flat {
+    pub dynamic_range_db: f32,
+    pub bands_db: [f32; 25],
 }
 
 /// Tabs, line breaks and U+FFFD (which marks a mis-encoded line on read) become spaces; ends trimmed.
@@ -20,33 +29,42 @@ pub fn clean(s: &str) -> String {
     s.replace(['\t', '\r', '\n', '\u{fffd}'], " ").trim().to_owned()
 }
 
-/// Tab-separated: name, mixer, group, dynamic range, 25 bands, then the sample rate when known (29 or 30 fields).
+/// Tab-separated: name, mixer, group, dynamic range, 25 bands, then the sample rate when known, then the centre
+/// dynamic range and 25 bands when both the sample rate and the centre sound are known (29, 30 or 56 fields).
 pub fn to_line(s: &Saved) -> String {
     let mut f = vec![clean(&s.name), clean(&s.mixer), clean(&s.group)];
-    f.extend([s.dynamic_range_db].iter().chain(&s.bands_db).map(|v| format!("{v:.2}")));
+    let num = |v: &f32| format!("{v:.2}");
+    f.extend([s.dynamic_range_db].iter().chain(&s.bands_db).map(num));
     f.extend(s.sample_rate.map(|r| r.to_string()));
+    if let (Some(_), Some(flat)) = (s.sample_rate, &s.flat) {
+        f.extend([flat.dynamic_range_db].iter().chain(&flat.bands_db).map(num));
+    }
     f.join("\t")
+}
+
+/// Dynamic range and 25 bands from 26 fields.
+fn sound(f: &[&str]) -> Option<(f32, [f32; 25])> {
+    let n: Vec<f32> = f.iter().map(|v| v.trim().parse().ok().filter(|v: &f32| v.is_finite())).collect::<Option<_>>()?;
+    let (&dr, bands) = n.split_first()?;
+    Some((dr, bands.try_into().ok()?))
 }
 
 fn parse_line(line: &str) -> Option<Saved> {
     let f: Vec<&str> = line.split('\t').collect();
     let [name, mixer, group, nums @ ..] = f.as_slice() else { return None };
-    let (nums, sample_rate) = match nums {
-        [n @ .., r] if n.len() == 26 => (n, Some(r.trim().parse().ok()?)),
-        n => (n, None),
-    };
-    let n: Vec<f32> = nums.iter().map(|v| v.trim().parse().ok().filter(|v: &f32| v.is_finite())).collect::<Option<_>>()?;
-    if name.trim().is_empty() || n.len() != 26 {
+    if name.trim().is_empty() || ![26, 27, 53].contains(&nums.len()) {
         return None;
     }
-    Some(Saved {
-        name: name.to_string(),
-        mixer: mixer.to_string(),
-        group: group.to_string(),
-        dynamic_range_db: n[0],
-        bands_db: n[1..].try_into().ok()?,
-        sample_rate,
-    })
+    let (dynamic_range_db, bands_db) = sound(&nums[..26])?;
+    let sample_rate = nums.get(26).map(|r| r.trim().parse()).transpose().ok()?;
+    let flat = match nums.get(27..) {
+        Some(f) if !f.is_empty() => {
+            let (dynamic_range_db, bands_db) = sound(f)?;
+            Some(Flat { dynamic_range_db, bands_db })
+        }
+        _ => None,
+    };
+    Some(Saved { name: name.to_string(), mixer: mixer.to_string(), group: group.to_string(), dynamic_range_db, bands_db, sample_rate, flat })
 }
 
 /// The sounds, and the first line (1-based) that does not parse (hand edits, truncation); those are skipped.
@@ -144,7 +162,28 @@ mod tests {
 
     fn sample(name: &str) -> Saved {
         Saved { name: name.into(), mixer: "Mackie ProFX22v3 (2019, LEVEL SET LED)".into(), group: "CH1-12 (COMP)".into(),
-                dynamic_range_db: 12.25, bands_db: std::array::from_fn(|i| -1.5 * i as f32), sample_rate: Some(48_000) }
+                dynamic_range_db: 12.25, bands_db: std::array::from_fn(|i| -1.5 * i as f32), sample_rate: Some(48_000), flat: None }
+    }
+    fn with_flat(name: &str) -> Saved {
+        Saved { flat: Some(Flat { dynamic_range_db: 12.5, bands_db: [-30.0; 25] }), ..sample(name) }
+    }
+    #[test] fn flat_round_trip() {
+        let s = with_flat("가");
+        let line = to_line(&s);
+        assert_eq!(line.split('\t').count(), 56);
+        assert_eq!(parse(&line), (vec![s], None));
+    }
+    #[test] fn older_lines_have_no_flat() {
+        let thirty = to_line(&with_flat("가")).split('\t').take(30).collect::<Vec<_>>().join("\t");
+        assert_eq!(parse(&thirty), (vec![sample("가")], None));
+        let no_rate = Saved { sample_rate: None, ..with_flat("가") }; // the centre sound is written only with a sample rate
+        assert_eq!(to_line(&no_rate).split('\t').count(), 29);
+        assert_eq!(parse(&to_line(&no_rate)), (vec![Saved { flat: None, ..no_rate }], None));
+    }
+    #[test] fn wrong_field_count_is_bad() {
+        let line = to_line(&with_flat("가"));
+        let f: Vec<&str> = line.split('\t').collect();
+        for n in [31, 55] { assert_eq!(parse(&f[..n].join("\t")), (vec![], Some(1)), "{n}"); }
     }
     #[test] fn line_roundtrip() {
         let s = sample("홍길동 목사님 설교");

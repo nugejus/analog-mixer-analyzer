@@ -85,7 +85,7 @@ pub fn move_db(m: &Move, hz: f32) -> f32 {
     }
 }
 
-/// LTASS + 세팅의 move. hpf는 그룹의 저역컷 스위치 hz로 바꾸고, 맡을 노브가 없는 move는 빼서 그 hz를 돌려줍니다.
+/// LTASS + 세팅의 move. hpf는 그룹의 저역컷 스위치 hz로 바꾸고, 맡을 노브가 없는 move(스위치 없는 hpf 포함)는 빼서 그 hz를 돌려줍니다.
 pub fn preset_target(p: &Preset, voice: Voice, group: &ChannelGroup) -> ([f32; 25], Vec<f32>) {
     let ctl = &group.controls;
     let cut = ctl.iter().find_map(|&c| match c {
@@ -97,7 +97,7 @@ pub fn preset_target(p: &Preset, voice: Voice, group: &ChannelGroup) -> ([f32; 2
     for &m in p.moves {
         let (Move::Hpf(hz) | Move::LowShelf(hz, _) | Move::HighShelf(hz, _) | Move::Bell(hz, ..)) = m;
         let (m, keep) = match m {
-            Move::Hpf(_) => (Move::Hpf(cut.unwrap_or(hz)), true),
+            Move::Hpf(_) => (Move::Hpf(cut.unwrap_or(hz)), cut.is_some()),
             Move::LowShelf(..) => (m, ctl.iter().any(|c| matches!(c, Control::LowShelf { .. }))),
             Move::HighShelf(..) => (m, ctl.iter().any(|c| matches!(c, Control::HighShelf { .. }))),
             Move::Bell(..) => (
@@ -199,8 +199,14 @@ mod tests {
         let (t, _) = preset_target(&PRESETS[3], Voice::Male, &g(MixerModel::Mackie1202Vlz4)); // LowCut 75
         let want = ltass_db(Voice::Male)[0] + hpf_db(75.0, 63.0) + move_db(&Move::Bell(3000.0, 4.0, 0.0), 63.0);
         assert!((t[0] - want).abs() < 1e-4);
-        let (t, _) = preset_target(&PRESETS[5], Voice::Male, &g(MixerModel::SoundcraftEpm)); // 스위치 없음
-        assert!((t[0] - (ltass_db(Voice::Male)[0] + hpf_db(135.0, 63.0) + move_db(&Move::Bell(300.0, -4.5, 0.0), 63.0))).abs() < 1e-4);
+    }
+    #[test] fn hpf_dropped_without_switch() {
+        // 스위치가 없으면 LOW가 저역컷을 흉내 내며 크게 깎지 않게 뺍니다.
+        let (t, dropped) = preset_target(&PRESETS[3], Voice::Male, &g(MixerModel::SoundcraftEpm));
+        let want: [f32; 25] = std::array::from_fn(|i| ltass_db(Voice::Male)[i] + move_db(&Move::Bell(3000.0, 4.0, 0.0), BANDS_HZ[i]));
+        assert!(t.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-4) && dropped == [100.0], "{t:?} {dropped:?}");
+        let stereo = MixerFactory::create(MixerModel::SoundcraftSignature12).groups.remove(1);
+        assert_eq!(preset_target(&PRESETS[3], Voice::Male, &stereo), (ltass_db(Voice::Male), vec![100.0, 3000.0]));
     }
     #[test] fn moves_without_knob_are_dropped() {
         let dropped = |i: usize, m| preset_target(&PRESETS[i], Voice::Male, &g(m)).1;
