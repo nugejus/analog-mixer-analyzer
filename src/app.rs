@@ -24,6 +24,8 @@ const SMOOTHING: [(&str, f32); 3] = [("빠름 0.3초", 0.3), ("보통 1초", 1.0
 const RESOLUTIONS: [(&str, usize); 4] =
     [("1/12옥타브", 12), ("1/24옥타브", 24), ("1/48옥타브", 48), ("1/96옥타브", 96)];
 const KNOB_W: f32 = 96.0;
+/// Left control panel width.
+const SIDE_W: f32 = 270.0;
 const KNOB_R: f32 = 20.0;
 
 /// One press of `분석`: collects audio frames until `needed` have arrived.
@@ -340,7 +342,10 @@ impl App {
         }
     }
 
-    fn top_bar(&mut self, ui: &mut egui::Ui) {
+    fn side_panel(&mut self, ui: &mut egui::Ui) {
+        // Combos fill the panel; long mixer names are cut with "…" instead of widening it.
+        ui.spacing_mut().combo_width = ui.available_width();
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
         ui.label("믹서");
         let mut model = self.model;
         egui::ComboBox::from_id_salt("mixer")
@@ -367,6 +372,7 @@ impl App {
             self.group = group;
             self.readvise();
         }
+        ui.separator();
         ui.label("입력장치");
         let mut pick = self.device.clone();
         let combo = egui::ComboBox::from_id_salt("device")
@@ -397,6 +403,7 @@ impl App {
         {
             live.rec = None;
         }
+        ui.separator();
         ui.label("목표");
         let (voice, pick) = (self.voice, self.pick);
         let title = |pick| match pick {
@@ -426,11 +433,12 @@ impl App {
                 format!("저장: {} {} — 저장할 때와 같은 사람·같은 마이크로 분석하세요.", s.mixer, s.group)
             }
         };
-        // Extend: the description moves to the next row whole instead of breaking mid-sentence.
-        ui.add(egui::Label::new(egui::RichText::new(when).color(mocha::SUBTEXT0)).wrap_mode(egui::TextWrapMode::Extend));
+        ui.add(egui::Label::new(egui::RichText::new(when).color(mocha::SUBTEXT0)).wrap_mode(egui::TextWrapMode::Wrap));
         ui.add_enabled_ui(matches!(self.pick, Pick::Preset(_)), |ui| {
-            ui.selectable_value(&mut self.voice, Voice::Male, "남성");
-            ui.selectable_value(&mut self.voice, Voice::Female, "여성");
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.voice, Voice::Male, "남성");
+                ui.selectable_value(&mut self.voice, Voice::Female, "여성");
+            });
         });
         if self.pick != pick {
             self.confirm_delete = false;
@@ -438,16 +446,23 @@ impl App {
         if (self.voice, self.pick) != (voice, pick) {
             self.readvise();
         }
-        self.save_controls(ui);
+        ui.horizontal_wrapped(|ui| self.save_controls(ui));
+        ui.separator();
         let recording = self.live.as_ref().is_ok_and(|l| l.rec.is_some());
-        ui.label("녹음");
-        ui.add_enabled(
-            !recording,
-            egui::Slider::new(&mut self.rec_seconds, 15..=30).suffix("초"),
-        );
+        ui.horizontal(|ui| {
+            ui.label("녹음");
+            ui.add_enabled(
+                !recording,
+                egui::Slider::new(&mut self.rec_seconds, 15..=30).suffix("초"),
+            );
+        });
         let label = if recording { "취소" } else { "분석" };
+        let button = egui::Button::new(egui::RichText::new(label).strong()).min_size(vec2(0.0, 32.0));
+        // Justified layout stretches the button across the panel and centres its text.
+        let enabled = self.live.is_ok();
         if ui
-            .add_enabled(self.live.is_ok(), egui::Button::new(label))
+            .vertical_centered_justified(|ui| ui.add_enabled(enabled, button))
+            .inner
             .clicked()
             && let Ok(live) = &mut self.live
         {
@@ -461,6 +476,7 @@ impl App {
                 ))
             };
         }
+        ui.separator();
         ui.label("실시간 선");
         egui::ComboBox::from_id_salt("smooth")
             .selected_text(SMOOTHING[self.smooth].0)
@@ -483,16 +499,18 @@ impl App {
         {
             live.curve = DisplayCurve::new(spectrum::display_freqs(RESOLUTIONS[self.res].1).len());
         }
-        if ui.button("클리핑 리셋").clicked()
-            && let Ok(live) = &mut self.live
-        {
-            live.levels.reset_clips();
-        }
-        if ui.button("피크 리셋").clicked()
-            && let Ok(live) = &mut self.live
-        {
-            live.curve.reset_peak();
-        }
+        ui.horizontal(|ui| {
+            if ui.button("피크 리셋").clicked()
+                && let Ok(live) = &mut self.live
+            {
+                live.curve.reset_peak();
+            }
+            if ui.button("클리핑 리셋").clicked()
+                && let Ok(live) = &mut self.live
+            {
+                live.levels.reset_clips();
+            }
+        });
     }
 }
 
@@ -816,7 +834,9 @@ impl eframe::App for App {
             self.analysis = finished;
             self.readvise();
         }
-        egui::Panel::top("top").show(ui, |ui| ui.horizontal_wrapped(|ui| self.top_bar(ui)));
+        egui::Panel::left("controls").resizable(false).exact_size(SIDE_W).show(ui, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| self.side_panel(ui))
+        });
         let (advice, live) = (self.advice.as_ref(), self.live.as_ref().ok());
         let summary = self.analysis.as_ref().and_then(|a| a.summary.as_ref());
         egui::Panel::bottom("advice").show(ui, |ui| {
