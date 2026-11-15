@@ -81,14 +81,14 @@ pub fn db(power: f32) -> f32 {
     (10.0 * power.log10()).max(FLOOR_DB)
 }
 
-/// Sum of bin power with centre frequency in [lo_hz, hi_hz).
+/// Bin power in [lo_hz, hi_hz): bin k spans [(k−½)·bw, (k+½)·bw] and counts by the part of it inside.
 pub fn band_db(bin_power: &[f32], sample_rate: f32, lo_hz: f32, hi_hz: f32) -> f32 {
     let bw = sample_rate / FFT_SIZE as f32;
+    let (lo, hi) = (lo_hz / bw, hi_hz / bw);
     let sum: f32 = bin_power
         .iter()
         .enumerate()
-        .filter(|&(k, _)| (lo_hz..hi_hz).contains(&(k as f32 * bw)))
-        .map(|(_, p)| p)
+        .map(|(k, p)| p * (hi.min(k as f32 + 0.5) - lo.max(k as f32 - 0.5)).max(0.0))
         .sum();
     db(sum)
 }
@@ -278,6 +278,18 @@ mod tests {
                 got - want
             );
             assert!((got - want).abs() < 1.5, "{hz}: {got} vs {want}");
+        }
+    }
+    #[test]
+    fn flat_bands_follow_band_width() {
+        let edge = 2f32.powf(1.0 / 6.0);
+        for sr in [44_100.0f32, 48_000.0, 96_000.0] {
+            let bw = sr / FFT_SIZE as f32;
+            let flat = vec![1.0f32; FFT_SIZE / 2 + 1];
+            for (fc, b) in BANDS_HZ.iter().zip(third_octave_db(&flat, sr)) {
+                let want = 10.0 * (fc * (edge - 1.0 / edge) / bw).log10();
+                assert!((b - want).abs() < 0.01, "sr {sr} {fc} Hz: {b} vs {want}");
+            }
         }
     }
     #[test]
