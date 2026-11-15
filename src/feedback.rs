@@ -45,6 +45,9 @@ impl FeedbackDetector {
             broken = !steady && self.active;
         }
         if broken {
+            if !self.active {
+                self.run = 0; // spec: 6 consecutive frames, no gaps before reporting
+            }
             self.miss += 1;
             if self.miss >= RUN {
                 self.run = 0;
@@ -122,6 +125,17 @@ mod tests {
         x.extend(mix(&sine(48_000.0, 2500.0, 0.3, 1.5), &noise(72_000, 0.001)));
         let hz = run(&x).last().copied().flatten().expect("detected");
         assert!((hz - 2500.0).abs() < 25.0);
+    }
+    #[test]
+    fn interrupted_run_is_not_feedback() {
+        let flat = vec![1e-8; FFT_SIZE / 2 + 1];
+        let mut howl = flat.clone();
+        howl[427] = 1e-2; // ≈2.5 kHz at 48 kHz
+        let mut fd = FeedbackDetector::new(48_000.0);
+        for _ in 0..6 {
+            assert_eq!(fd.push(&howl), None);
+            assert_eq!(fd.push(&flat), None);
+        }
     }
     #[test]
     fn redetects_after_release() {
