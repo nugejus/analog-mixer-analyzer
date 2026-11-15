@@ -13,9 +13,10 @@ use mixer_analyzer::{
     speech::{SpeechStats, Summary},
     target::{BANDS_HZ, BELL_OCT, PRESETS, Voice, preset_target},
     theme::{self, mocha},
+    update::{self, Latest},
 };
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 const DEMO: &str = "데모 신호";
@@ -233,6 +234,16 @@ fn open(device: &str, per_oct: usize) -> Result<Live, String> {
     .map_err(|e| format!("입력 장치를 열 수 없습니다: {e}"))
 }
 
+enum Update {
+    /// Background check still running.
+    Checking(mpsc::Receiver<Option<Latest>>),
+    /// Nothing to show: not newer, offline, or check failed.
+    Hidden,
+    Found(Latest),
+    Downloading(Latest, mpsc::Receiver<std::io::Result<PathBuf>>),
+    Failed(Latest, String),
+}
+
 pub struct App {
     devices: Vec<String>,
     device: String,
@@ -265,6 +276,7 @@ pub struct App {
     analysis: Option<Analysis>,
     advice: Option<AdviceSet>,
     show: Show,
+    update: Update,
 }
 
 impl App {
@@ -296,7 +308,12 @@ impl App {
                 (vec![], true)
             }
         };
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(update::fetch_latest().filter(|l| update::is_newer(&l.version, update::VERSION)));
+        });
         Self {
+            update: Update::Checking(rx),
             saved,
             default_dir,
             dir,
@@ -458,6 +475,7 @@ impl App {
         // Combos fill the panel; long mixer names are cut with "…" instead of widening it.
         ui.spacing_mut().combo_width = ui.available_width();
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+        self.update_notice(ui);
         ui.label("믹서");
         let mut model = self.model;
         egui::ComboBox::from_id_salt("mixer")
@@ -625,6 +643,65 @@ impl App {
         });
         ui.separator();
         self.folder_controls(ui, frame);
+        ui.separator();
+        ui.colored_label(mocha::SUBTEXT0, format!("버전 {}", update::VERSION));
+    }
+
+    /// Polls the background check/download and draws the update notice, if any.
+    fn update_notice(&mut self, ui: &mut egui::Ui) {
+        self.update = match std::mem::replace(&mut self.update, Update::Hidden) {
+            Update::Checking(rx) => match rx.try_recv() {
+                Ok(Some(l)) => Update::Found(l),
+                Err(mpsc::TryRecvError::Empty) => Update::Checking(rx),
+                _ => Update::Hidden,
+            },
+            Update::Downloading(l, rx) => match rx.try_recv() {
+                Err(mpsc::TryRecvError::Empty) => Update::Downloading(l, rx),
+                Ok(Ok(path)) => match std::process::Command::new(&path).spawn() {
+                    Ok(_) => {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                        Update::Found(l)
+                    }
+                    Err(e) => Update::Failed(l, format!("설치 파일을 실행하지 못했습니다: {e}")),
+                },
+                Ok(Err(e)) => Update::Failed(l, format!("업데이트를 받지 못했습니다: {e}")),
+                Err(e) => Update::Failed(l, format!("업데이트를 받지 못했습니다: {e}")),
+            },
+            u => u,
+        };
+        let mut next = None;
+        match &self.update {
+            Update::Checking(_) | Update::Hidden => return,
+            Update::Downloading(..) => {
+                ui.label("업데이트 받는 중…");
+            }
+            Update::Found(l) | Update::Failed(l, _) => {
+                ui.label(format!("새 버전이 있습니다: {}", l.version));
+                if cfg!(windows) {
+                    if ui.button("업데이트").clicked() {
+                        let (tx, rx) = mpsc::channel();
+                        let url = l.url.clone();
+                        std::thread::spawn(move || {
+                            let path = std::env::temp_dir().join("MixerAnalyzer-Setup.exe");
+                            let _ = tx.send(update::download(&url, &path).map(|()| path));
+                        });
+                        next = Some(Update::Downloading(l.clone(), rx));
+                    }
+                } else if ui.button("받으러 가기").clicked() {
+                    next = Some(match update::open_url(update::FOLDER_URL) {
+                        Ok(()) => Update::Found(l.clone()),
+                        Err(e) => Update::Failed(l.clone(), format!("드라이브를 열지 못했습니다: {e}")),
+                    });
+                }
+                if let Update::Failed(_, e) = &self.update {
+                    ui.colored_label(mocha::RED, e);
+                }
+            }
+        }
+        ui.separator();
+        if let Some(n) = next {
+            self.update = n;
+        }
     }
 }
 
