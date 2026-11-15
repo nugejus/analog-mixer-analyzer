@@ -1,7 +1,7 @@
 use eframe::egui::{
     self, Align, Align2, Color32, Layout, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Vec2, vec2,
 };
-use egui_plot::{GridMark, Line, LineStyle, Plot, PlotPoint, PlotPoints, Points, Text, VLine};
+use egui_plot::{GridMark, Line, LineStyle, Plot, PlotPoint, PlotPoints, Points, Polygon, Text, VLine};
 use mixer_analyzer::{
     advice::{self, Action, Advice, AdviceEngine, AdviceSet, Inputs, fmt_hz},
     audio::{self, Input},
@@ -742,11 +742,12 @@ struct Show {
     peak: bool,
     target: bool,
     knobs: bool,
+    tone: bool,
 }
 
 impl Default for Show {
     fn default() -> Self {
-        Self { result: true, live: true, peak: true, target: true, knobs: true }
+        Self { result: true, live: true, peak: true, target: true, knobs: true, tone: true }
     }
 }
 
@@ -792,6 +793,7 @@ fn spectrum_plot(
     curve: &DisplayCurve,
     result_db: Option<&[f32]>,
     target_db: Option<[f32; 25]>,
+    tone_db: Option<[f32; 8]>,
     per_oct: usize,
     show: &Show,
     spans: &[Span],
@@ -830,6 +832,23 @@ fn spectrum_plot(
         }
     })
     .show(ui, |p| {
+        if let (true, Some(tone)) = (show.tone, tone_db) {
+            for (&(name, lo, hi), &d) in mixer_analyzer::target::TONE_BANDS.iter().zip(&tone) {
+                let (x0, x1) = (f64::from(lo.log10()), f64::from(hi.log10()));
+                let hot = d.abs() >= 3.0;
+                let color = if d >= 3.0 { mocha::RED } else { mocha::BLUE };
+                if hot {
+                    let alpha = if d >= 3.0 { 50 } else { 30 };
+                    let fill = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha);
+                    let pts: PlotPoints = [[x0, -90.0], [x1, -90.0], [x1, 0.0], [x0, 0.0]].into_iter().collect();
+                    p.polygon(Polygon::new("", pts).fill_color(fill).stroke(egui::Stroke::NONE));
+                }
+                let pos = PlotPoint::new((x0 + x1) / 2.0, -88.0);
+                let text = format!("{name}\n{d:+.1} dB");
+                let col = if hot { color } else { mocha::SUBTEXT0 };
+                p.text(Text::new("", pos, text).color(col).anchor(Align2::CENTER_BOTTOM));
+            }
+        }
         if show.peak {
             p.line(line("피크", &freqs, &curve.peak_db, mocha::SURFACE2));
         }
@@ -1110,10 +1129,16 @@ impl eframe::App for App {
                     ui.checkbox(&mut sh.peak, c("피크", mocha::OVERLAY1));
                     ui.checkbox(&mut sh.target, c("목표", mocha::SUBTEXT0));
                     ui.checkbox(&mut sh.knobs, c("노브 구간", mocha::OVERLAY1));
+                    ui.checkbox(&mut sh.tone, c("대역 비교", mocha::RED));
+                });
+                let tone = summary.zip(advice).map(|(s, a)| {
+                    let mut reference = self.goal.db;
+                    reference.iter_mut().for_each(|v| *v += a.level_offset_db);
+                    mixer_analyzer::target::tone_excess(&s.bands_db, &reference)
                 });
                 let spans = knob_spans(&self.profile.groups[self.group], advice);
                 let result = self.analysis.as_ref().and_then(|a| result_db(a, per_oct, FREQ_SMOOTH[self.freq_smooth].1));
-                spectrum_plot(ui, &live.curve, result.as_deref(), target, per_oct, &self.show, &spans, h * 0.6);
+                spectrum_plot(ui, &live.curve, result.as_deref(), target, tone, per_oct, &self.show, &spans, h * 0.6);
                 ui.strong("레벨/디스토션 기록 (최근 30초)");
                 level_plot(ui, live.levels.history(), h * 0.4);
                 status_line(

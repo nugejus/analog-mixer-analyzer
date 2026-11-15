@@ -120,6 +120,30 @@ pub fn preset_target(p: &Preset, voice: Voice, group: &ChannelGroup) -> ([f32; 2
     (t, dropped)
 }
 
+/// Tone-colour ranges (name, lo Hz, hi Hz); a third-octave centre in [lo, hi) belongs to it.
+pub const TONE_BANDS: [(&str, f32, f32); 8] = [
+    ("웅웅거림", 80.0, 250.0),
+    ("먹먹함", 250.0, 500.0),
+    ("통 울림", 500.0, 800.0),
+    ("비음", 800.0, 1500.0),
+    ("까랑함", 1500.0, 3000.0),
+    ("쏘는 소리", 3000.0, 5000.0),
+    ("치찰음", 5000.0, 10000.0),
+    ("공기감", 10000.0, 20000.0),
+];
+
+/// Per tone band: 10·log10(Σ measured power / Σ reference power), in dB.
+pub fn tone_excess(measured: &[f32; 25], reference: &[f32; 25]) -> [f32; 8] {
+    TONE_BANDS.map(|(_, lo, hi)| {
+        let (mut m, mut r) = (0.0f32, 0.0f32);
+        for i in (0..25).filter(|&i| (lo..hi).contains(&BANDS_HZ[i])) {
+            m += 10f32.powf(measured[i] / 10.0);
+            r += 10f32.powf(reference[i] / 10.0);
+        }
+        10.0 * (m / r).log10()
+    })
+}
+
 /// Byrne 1994 LTASS, 1/3-octave dB.
 pub fn ltass_db(voice: Voice) -> [f32; 25] {
     match voice {
@@ -183,5 +207,34 @@ mod tests {
         assert_eq!(ltass_db(Voice::Male)[12], 53.1);
         assert_eq!(ltass_db(Voice::Female)[5], 62.2);
         assert_eq!((BANDS_HZ[0], BANDS_HZ[24]), (63.0, 16000.0));
+    }
+
+    #[test]
+    fn tone_bands_partition_third_octaves() {
+        for (i, &hz) in BANDS_HZ.iter().enumerate() {
+            let n = TONE_BANDS.iter().filter(|&&(_, lo, hi)| (lo..hi).contains(&hz)).count();
+            assert_eq!(n, if i == 0 { 0 } else { 1 }, "{hz} Hz");
+        }
+    }
+
+    #[test]
+    fn tone_excess_sums_power() {
+        let reference = [0.0f32; 25];
+        assert!(tone_excess(&reference, &reference).iter().all(|d| d.abs() < 1e-4));
+        let mut m = reference;
+        m[15] = 6.0; // 2 kHz only: 10·log10((1 + 10^0.6 + 1) / 3) ≈ 3.0, not the dB mean 2.0
+        let e = tone_excess(&m, &reference);
+        assert!((e[4] - 2.996).abs() < 0.01, "{}", e[4]);
+        assert!(e.iter().enumerate().all(|(i, d)| i == 4 || d.abs() < 1e-4));
+    }
+
+    #[test]
+    fn tone_excess_follows_reference_level() {
+        let reference = [-40.0f32; 25];
+        let mut m = reference;
+        m[14..=16].iter_mut().for_each(|v| *v += 6.0); // 1600, 2000, 2500 = 까랑함
+        let e = tone_excess(&m, &reference);
+        assert_eq!(TONE_BANDS[4].0, "까랑함");
+        assert!((e[4] - 6.0).abs() < 0.01 && e[3].abs() < 1e-4 && e[5].abs() < 1e-4);
     }
 }
