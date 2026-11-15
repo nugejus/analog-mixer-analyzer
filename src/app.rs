@@ -339,43 +339,56 @@ impl App {
     }
 
     /// A new list (읽기, another folder) keeps the picked saved sound by name.
-    fn set_list(&mut self, list: Vec<Saved>) {
-        self.pick = repick(self.pick, &self.saved, &list);
-        self.saved = list;
-        self.readvise();
-    }
-
     /// A read of the save folder: on failure the list stays and that folder is not written until 읽기/쓰기.
     fn take_list(&mut self, r: std::io::Result<Vec<Saved>>) {
         self.write_blocked = r.is_err();
         self.save_error = match r {
             Ok(l) => {
-                self.set_list(l);
+                self.pick = repick(self.pick, &self.saved, &l);
+                self.saved = l;
+                self.readvise();
                 None
             }
             Err(e) => Some(format!("읽지 못했습니다: {e}")),
         };
     }
 
-    /// `저장 폴더`: the path (side_panel's Truncate cuts it with "…"; egui's Label then shows the full text on hover), 찾아보기…/폴더 열기, 읽기/쓰기.
-    fn folder_controls(&mut self, ui: &mut egui::Ui) {
+    /// `저장 폴더`: folder name (full path on hover), 찾아보기…/폴더 열기, 읽기/쓰기.
+    fn folder_controls(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
         ui.label("저장 폴더");
-        ui.label(self.dir.as_ref().map_or("저장 폴더를 찾을 수 없습니다".into(), |d| d.display().to_string()));
+        match &self.dir {
+            Some(d) => {
+                let name = d.file_name().map_or(d.display().to_string(), |n| format!("…/{}", n.to_string_lossy()));
+                ui.label(name).on_hover_text(d.display().to_string());
+            }
+            None => {
+                ui.label("저장 폴더를 찾을 수 없습니다");
+            }
+        }
         let on = self.dir.is_some();
         let button = |ui: &mut egui::Ui, enabled, text| ui.add_enabled(enabled, egui::Button::new(text)).clicked();
         let (browse, open) = ui.horizontal(|ui| (button(ui, true, "찾아보기…"), button(ui, on, "폴더 열기"))).inner;
         let (read, write) = ui.horizontal(|ui| (button(ui, on, "읽기"), button(ui, on, "쓰기"))).inner;
         if browse {
-            let dialog = rfd::FileDialog::new();
+            // Parented so the dialog stays in front of the (blocked) main window on Windows.
+            let dialog = rfd::FileDialog::new().set_parent(frame);
             let dialog = match &self.dir {
                 Some(d) => dialog.set_directory(d),
                 None => dialog,
             };
             if let Some(d) = dialog.pick_folder() {
                 let remembered = self.default_dir.as_deref().map_or(Ok(()), |def| saved::remember_dir(def, &d));
+                let had_file = d.join(saved::FILE).exists();
                 let list = saved::adopt(&d, &self.saved);
                 self.dir = Some(d);
-                self.take_list(list);
+                match list {
+                    // No file there, so the failure was writing the moved list: nothing to protect.
+                    Err(e) if !had_file => {
+                        self.write_blocked = false;
+                        self.save_error = Some(format!("저장하지 못했습니다: {e}"));
+                    }
+                    list => self.take_list(list),
+                }
                 // A read error matters more: it is the one that blocks saving.
                 if let (Err(e), false) = (remembered, self.write_blocked) {
                     self.save_error = Some(format!("저장하지 못했습니다: {e}"));
@@ -441,7 +454,7 @@ impl App {
         }
     }
 
-    fn side_panel(&mut self, ui: &mut egui::Ui) {
+    fn side_panel(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
         // Combos fill the panel; long mixer names are cut with "…" instead of widening it.
         ui.spacing_mut().combo_width = ui.available_width();
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
@@ -611,7 +624,7 @@ impl App {
             }
         });
         ui.separator();
-        self.folder_controls(ui);
+        self.folder_controls(ui, frame);
     }
 }
 
@@ -917,7 +930,7 @@ fn knob_row(ui: &mut egui::Ui, knobs: &[Advice]) {
 }
 
 impl eframe::App for App {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let finished = self.live.as_mut().ok().and_then(|live| {
             live.pump(self.channel, SMOOTHING[self.smooth].1, RESOLUTIONS[self.res].1);
             let rec = live.rec.take_if(|r| r.done())?;
@@ -936,7 +949,7 @@ impl eframe::App for App {
             self.readvise();
         }
         egui::Panel::left("controls").resizable(false).exact_size(SIDE_W).show(ui, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| self.side_panel(ui))
+            egui::ScrollArea::vertical().show(ui, |ui| self.side_panel(ui, frame))
         });
         let (advice, live) = (self.advice.as_ref(), self.live.as_ref().ok());
         let summary = self.analysis.as_ref().and_then(|a| a.summary.as_ref());

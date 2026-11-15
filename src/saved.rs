@@ -73,7 +73,8 @@ pub fn default_dir() -> Option<PathBuf> {
 /// The folder last picked, from `folder.txt` in the default folder; blank or unreadable = None.
 pub fn remembered_dir(default: &Path) -> Option<PathBuf> {
     let s = std::fs::read_to_string(default.join(REMEMBER)).ok()?;
-    Some(s.trim()).filter(|s| !s.is_empty()).map(PathBuf::from)
+    // Only the line break is dropped: macOS folder names may end in a space.
+    Some(s.trim_end_matches(['\r', '\n'])).filter(|s| !s.trim().is_empty()).map(PathBuf::from)
 }
 
 /// Remembers `dir` as the save folder.
@@ -171,7 +172,9 @@ mod tests {
         assert_eq!(remembered_dir(&d), None);
         remember_dir(&d, Path::new("/x/y z")).unwrap();
         assert_eq!(remembered_dir(&d), Some(PathBuf::from("/x/y z")));
-        std::fs::write(d.join("folder.txt"), "  \n").unwrap();
+        remember_dir(&d, Path::new("/x/Sound ")).unwrap();
+    assert_eq!(remembered_dir(&d), Some(PathBuf::from("/x/Sound ")));
+    std::fs::write(d.join("folder.txt"), "  \n").unwrap();
         assert_eq!(remembered_dir(&d), None);
         std::fs::remove_dir_all(&d).unwrap();
     }
