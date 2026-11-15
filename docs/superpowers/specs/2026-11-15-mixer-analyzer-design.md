@@ -144,26 +144,35 @@ EQ ±15 dB(300°)는 모든 믹서에 공통입니다. "게인"은 게인 노브
 | | | CH13-14 | 60 | 100 | 12k | 100–8k | 80 | – | |
 | | | CH15-20 (스테레오 마이크) | 60 | 100 | 12k | 100–8k | 80 | – | |
 | Mackie | ProFX10v3 | CH1-2 (COMP) / CH3-4 | 60 | 100 | 12k | 2.5k | 80 | ✓ / – | MACKIE_USB |
-| Mackie | ProFX12v3 | CH1-4 (COMP) | 60 | 100 | 12k | 2.5k | 80 | ✓ | MACKIE_USB |
-| Mackie | ProFX16v3 | CH1-8 (COMP) | 60 | 100 | 12k | 100–8k | 80 | ✓ | MACKIE_USB |
-| Mackie | ProFX30v3 | CH1-16 (COMP) / CH17-22 | 60 | 100 | 12k | 100–8k | 80 | ✓ / – | MACKIE_USB |
+| Mackie | ProFX12v3 | CH1-4 (COMP) / CH5-10 (스테레오 마이크) | 60 | 100 | 12k | 2.5k | 80 | ✓ / – | MACKIE_USB |
+| Mackie | ProFX16v3 | CH1-8 (COMP) / CH9-14 (스테레오 마이크) | 60 | 100 | 12k | 100–8k | 80 | ✓ / – | MACKIE_USB |
+| Mackie | ProFX30v3 | CH1-16 (COMP) / CH17-22 / CH23-28 (스테레오 마이크) | 60 | 100 | 12k | 100–8k | 80 | ✓ / – / – | MACKIE_USB |
 | Mackie | 1202VLZ4 / 1402VLZ4 | 모노 CH | 60 | 75 | 12k | 2.5k | 80 | – | NO_USB_SOLO |
 | Mackie | 1604VLZ4 | CH1-16 | 60 | 75 | 12k | 100–8k | 80 | – | NO_USB_SOLO |
 | Yamaha | MGP24X | CH1-8 / CH9-16 (COMP) | 44 | 100 | 8k | 250–5k | 125 | – / ✓ | YAMAHA_MGP |
 | Yamaha | MGP32X | CH1-8 / CH9-24 (COMP) | 44 | 100 | 8k | 250–5k | 125 | – / ✓ | YAMAHA_MGP |
 | Yamaha | MGP16X | CH1-8 (COMP) | 44 | 100 | 8k | 250–5k | 125 | ✓ | YAMAHA_MGP |
+| | | CH9-12 (모노/스테레오) | 44 | 100 | 8k | 2.5k | 125 | – | |
 | Yamaha | MGP12X | CH1-4 (COMP) | 44 | 100 | 8k | 250–5k | 125 | ✓ | YAMAHA_MGP |
+| | | CH5-8 (모노/스테레오) | 44 | 100 | 8k | 2.5k | 125 | – | |
 | Yamaha | MG20XU | CH1-8 (COMP) / CH9-12 | 44 | 80 | 10k | 250–5k | 100 | ✓ / – | YAMAHA_XU |
+| | | CH13-20 (모노/스테레오) | 44 | 80 | 10k | 2.5k | 100 | – | |
 | Yamaha | MG16XU | CH1-8 (COMP) | 44 | 80 | 10k | 250–5k | 100 | ✓ | YAMAHA_XU |
-| Yamaha | MG12XU | CH1-4 (COMP) | 44 | 80 | 10k | 2.5k | 100 | ✓ | YAMAHA_XU |
+| | | CH9-12 (모노/스테레오) | 44 | 80 | 10k | 2.5k | 100 | – | |
+| Yamaha | MG12XU | CH1-4 (COMP) / CH5-8 (모노/스테레오) | 44 | 80 | 10k | 2.5k | 100 | ✓ / – | YAMAHA_XU |
 | Yamaha | MG10XU | CH1-2 (COMP) / CH3-4 | 44 | 80 | 10k | 2.5k | 100 | ✓ / – | YAMAHA_XU |
 | Yamaha | MG06X | CH1-2 | 44 | 80 | 10k | (없음) | 100 | – | NO_USB_SOLO |
 | Behringer | X1222USB | CH1-4 (COMP) | 50 | 80 | 12k | 2.5k | 80 | ✓ | BEHRINGER_USB |
+| | | CH5-8 (스테레오 마이크) | 40 | (없음) | 12k | 2.5k | 80 | – | |
 | Behringer | QX1222USB | CH1-4 (COMP) | 50 | 75 | 12k | 2.5k | 80 | ✓ | BEHRINGER_USB |
+| | | CH5-8 (스테레오 마이크) | 40 | (없음) | 12k | 2.5k | 80 | – | |
 | Behringer | X1832USB | CH1-6 (COMP) | 50 | 75 | 12k | 100–8k | 80 | ✓ | BEHRINGER_USB |
 | Behringer | X2222USB / QX2222USB / X2442USB (각각) | CH1-8 (COMP) | 50 | 75 | 12k | 100–8k | 80 | ✓ | BEHRINGER_USB |
+| | X2442USB | CH9-12 (스테레오 마이크) | 40 | 75 | 12k | 3k, 500 (2개 고정) | 80 | – | |
 | Soundcraft | Signature 12 | CH1-6 | 50 | 100 | 12k | 140–3k | 60 | – | SOUNDCRAFT_USB |
+| | | CH7-10 (스테레오 마이크) | 50 | (없음) | 12k | 1k | 60 | – | |
 | Soundcraft | Signature 22 | 모노 CH | 50 | 100 | 12k | 80–2k, 400–8k (2개) | 60 | – | SOUNDCRAFT_USB |
+| | | CH15-18 (스테레오 마이크) | 50 | (없음) | 12k | 140–3k | 60 | – | |
 | Soundcraft | EPM 6/8/12 | 모노 CH | 55 | (없음) | 12k | 150–3.5k | 80 | – | NO_USB_SOLO |
 | Allen & Heath | ZED-10 / 10FX | M1-M4 | 50 | 100 | 12k | 120–4k | 80 | – | AH_USB |
 | Allen & Heath | ZED-12FX / 16FX / 22FX | 모노 CH | 69 | 100 | 12k | 120–4k | 80 | – | AH_USB |
@@ -180,7 +189,7 @@ EQ ±15 dB(300°)는 모든 믹서에 공통입니다. "게인"은 게인 노브
 - AH_USB: "USB 출력 선택 스위치를 모두 해제하면 메인 L-R이 갑니다. 맞출 채널만 올리고 다른 채널은 내리세요."
 - NO_USB_SOLO: "이 믹서는 USB가 없습니다. 맞출 채널을 SOLO/PFL하고 CONTROL ROOM(또는 PHONES) 출력을 오디오 인터페이스로 PC에 연결하세요."
 
-신뢰도 "중간"인 값(문서끼리 다름)은 코드 주석에 표시합니다: Behringer 저역컷 75/80 Hz, Soundcraft Signature 게인 범위, EPM LOW 60/80 Hz, ZEDi 게인, MGP12X HPF 유무. Soundcraft Signature의 리미터 버튼은 추천하지 않습니다(YAGNI).
+신뢰도 "중간"인 값(문서끼리 다르거나 문서로 확인 못 함)은 코드 주석에 표시합니다: Behringer 저역컷 75/80 Hz, Soundcraft Signature 게인 범위, EPM LOW 60/80 Hz, ZEDi 게인, QX1222 저역컷, Signature 스테레오 HPF, X2442 스테레오 마이크 게인. Soundcraft Signature의 리미터 버튼은 추천하지 않습니다(YAGNI).
 
 ## 빌드와 배포
 - `scripts/build-mac.sh`
