@@ -1,7 +1,7 @@
 use eframe::egui::{
     self, Align, Align2, Color32, Layout, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Vec2, vec2,
 };
-use egui_plot::{GridMark, Legend, Line, LineStyle, Plot, PlotPoint, PlotPoints, Points, Text, VLine};
+use egui_plot::{GridMark, Line, LineStyle, Plot, PlotPoint, PlotPoints, Points, Text, VLine};
 use mixer_analyzer::{
     advice::{self, Action, Advice, AdviceEngine, AdviceSet, Inputs, fmt_hz},
     audio::{self, Input},
@@ -426,7 +426,8 @@ impl App {
                 format!("저장: {} {} — 저장할 때와 같은 사람·같은 마이크로 분석하세요.", s.mixer, s.group)
             }
         };
-        ui.colored_label(mocha::SUBTEXT0, when);
+        // Extend: the description moves to the next row whole instead of breaking mid-sentence.
+        ui.add(egui::Label::new(egui::RichText::new(when).color(mocha::SUBTEXT0)).wrap_mode(egui::TextWrapMode::Extend));
         ui.add_enabled_ui(matches!(self.pick, Pick::Preset(_)), |ui| {
             ui.selectable_value(&mut self.voice, Voice::Male, "남성");
             ui.selectable_value(&mut self.voice, Voice::Female, "여성");
@@ -602,7 +603,6 @@ fn spectrum_plot(
             hz.to_string()
         }
     })
-    .legend(Legend::default())
     .show(ui, |p| {
         if show.peak {
             p.line(line("피크", &freqs, &curve.peak_db, mocha::SURFACE2));
@@ -617,10 +617,10 @@ fn spectrum_plot(
             p.line(line("목표", &BANDS_HZ, &t, mocha::SUBTEXT0).style(LineStyle::dotted_dense()));
         }
         if show.knobs {
-            // Unnamed items stay out of the legend.
-            let step = (28.0 / spans.len().max(1) as f64).min(4.0);
+            // Rows start at −5 dB so the first label is not clipped by the top edge.
+            let step = (25.0 / spans.len().max(1) as f64).min(4.0);
             for (i, s) in spans.iter().enumerate() {
-                let y = -2.0 - step * i as f64;
+                let y = -5.0 - step * i as f64;
                 let bar = |lo: f32, hi: f32| {
                     let pts: PlotPoints = [lo, hi].iter().map(|f| [f64::from(f.log10()), y]).collect();
                     Line::new("", pts)
@@ -869,12 +869,14 @@ impl eframe::App for App {
                 ui.horizontal(|ui| {
                     ui.strong("실시간 주파수 그래프");
                     ui.label("표시");
+                    // The coloured names double as the legend (a plot legend would cover the HIGH bar).
                     let sh = &mut self.show;
-                    ui.checkbox(&mut sh.result, "분석 결과");
-                    ui.checkbox(&mut sh.live, "현재 소리");
-                    ui.checkbox(&mut sh.peak, "피크");
-                    ui.checkbox(&mut sh.target, "목표");
-                    ui.checkbox(&mut sh.knobs, "노브 구간");
+                    let c = |t: &str, col| egui::RichText::new(t).color(col);
+                    ui.checkbox(&mut sh.result, c("분석 결과", mocha::GREEN));
+                    ui.checkbox(&mut sh.live, c("현재 소리", mocha::BLUE));
+                    ui.checkbox(&mut sh.peak, c("피크", mocha::OVERLAY1));
+                    ui.checkbox(&mut sh.target, c("목표", mocha::SUBTEXT0));
+                    ui.checkbox(&mut sh.knobs, c("노브 구간", mocha::OVERLAY1));
                 });
                 let spans = knob_spans(&self.profile.groups[self.group], advice);
                 let result = self.analysis.as_ref().and_then(|a| result_db(a, per_oct));
