@@ -14,9 +14,9 @@
 ## latest.txt
 ```
 0.3.0
-https://drive.google.com/uc?export=download&id=<설치 파일 ID>
+https://drive.usercontent.google.com/download?id=<설치 파일 ID>&export=download&confirm=t
 ```
-첫 줄 최신 버전(점으로 나눈 숫자), 둘째 줄 윈도 설치 파일 주소(https). 앞뒤 공백·CRLF·UTF-8 BOM은 무시(메모장으로 고쳐도 되게). 형식이 틀리면(드라이브가 HTML 오류 페이지를 줄 때 포함) 새 버전 없음으로 본다.
+첫 줄 최신 버전(점으로 나눈 숫자), 둘째 줄 윈도 설치 파일 주소(https). 앞뒤 공백·CRLF·UTF-8 BOM은 무시(메모장으로 고쳐도 되게). 형식이 틀리면(드라이브가 HTML 오류 페이지를 줄 때 포함) 새 버전 없음으로 본다. 설치 파일 주소는 `confirm=t` 형식: 드라이브는 실행 파일에 "바이러스 검사를 할 수 없음" 확인 페이지를 끼워 넣어서 `uc?export=download`로는 HTML이 받아짐(확인함).
 
 ## 앱 동작
 - 버전은 `Cargo.toml` 하나가 기준. 이번에 0.2.0, 배포할 때마다 올린다. 사이드 패널 맨 아래 `버전 0.2.0`(흐린 글씨).
