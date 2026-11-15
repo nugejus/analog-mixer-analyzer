@@ -676,25 +676,27 @@ impl App {
                 ui.label("업데이트 받는 중…");
             }
             Update::Found(l) | Update::Failed(l, _) => {
-                ui.label(format!("새 버전이 있습니다: {}", l.version));
-                if cfg!(windows) {
-                    if ui.button("업데이트").clicked() {
-                        let (tx, rx) = mpsc::channel();
-                        let url = l.url.clone();
-                        std::thread::spawn(move || {
-                            let path = std::env::temp_dir().join("MixerAnalyzer-Setup.exe");
-                            let _ = tx.send(update::download(&url, &path).map(|()| path));
+                ui.horizontal(|ui| {
+                    ui.label(format!("새 버전이 있습니다: {}", l.version));
+                    if cfg!(windows) {
+                        if ui.button("업데이트").clicked() {
+                            let (tx, rx) = mpsc::channel();
+                            let url = l.url.clone();
+                            std::thread::spawn(move || {
+                                let path = std::env::temp_dir().join("MixerAnalyzer-Setup.exe");
+                                let _ = tx.send(update::download(&url, &path).map(|()| path));
+                            });
+                            next = Some(Update::Downloading(l.clone(), rx));
+                        }
+                    } else if ui.button("받으러 가기").clicked() {
+                        next = Some(match update::open_url(update::FOLDER_URL) {
+                            Ok(()) => Update::Found(l.clone()),
+                            Err(e) => Update::Failed(l.clone(), format!("드라이브를 열지 못했습니다: {e}")),
                         });
-                        next = Some(Update::Downloading(l.clone(), rx));
                     }
-                } else if ui.button("받으러 가기").clicked() {
-                    next = Some(match update::open_url(update::FOLDER_URL) {
-                        Ok(()) => Update::Found(l.clone()),
-                        Err(e) => Update::Failed(l.clone(), format!("드라이브를 열지 못했습니다: {e}")),
-                    });
-                }
+                });
                 if let Update::Failed(_, e) = &self.update {
-                    ui.colored_label(mocha::RED, e);
+                    ui.add(egui::Label::new(egui::RichText::new(e).color(mocha::RED)).wrap());
                 }
             }
         }
