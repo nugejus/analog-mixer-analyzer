@@ -3,7 +3,7 @@
 마이크로 말하는 소리를 실시간으로 분석해서, 아날로그 믹서의 어떤 노브를 얼마나 돌릴지 알려 주는 프로그램입니다. 사운드 체크할 때 맞출 채널에 말을 하면 됩니다.
 
 ## 설치
-- **Mac**: `MixerAnalyzer-mac.zip`을 풀고 `MixerAnalyzer.app`을 응용 프로그램 폴더로 옮깁니다. (Apple 칩, 인텔 모두 됩니다.)
+- **Mac**: 화면 왼쪽 위 Apple 메뉴 → **이 Mac에 관하여**에서 칩을 확인합니다. "Apple M…"이면 `MixerAnalyzer-mac-AppleSilicon.zip`, "Intel"이면 `MixerAnalyzer-mac-Intel.zip`을 받아 풀고 `MixerAnalyzer.app`을 응용 프로그램 폴더로 옮깁니다.
 - **Windows**: `MixerAnalyzer-win.zip`을 풀면 나오는 `MixerAnalyzer.exe`를 원하는 폴더에 두고 실행합니다. 설치는 필요 없습니다.
 
 ## 첫 실행
