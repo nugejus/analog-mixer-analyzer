@@ -481,14 +481,16 @@ pub fn neutral_summary(bands_db: [f32; 25], dynamic_range_db: f32) -> Summary {
     }
 }
 
-/// 같은 라벨끼리 EQ 노브가 3 dB 이상(✓는 0 dB), FREQ가 한 칸(1/3옥타브) 넘게, 또는 저역컷 켜기 여부가 다르면 참.
+/// 같은 라벨끼리 EQ 노브가 3 dB 이상(✓는 ±2.5 dB 안의 가장 가까운 값), FREQ가 한 칸(1/3옥타브) 넘게, 또는 저역컷 켜기 여부가 다르면 참.
 /// 한쪽에만 있는 라벨은 무시하고, 한쪽이 Wait(말소리 부족)면 비교할 추천이 없으니 거짓입니다.
 pub fn knobs_differ(a: &[Advice], b: &[Advice]) -> bool {
     if a.iter().chain(b).any(|k| k.action == Action::Wait) {
         return false;
     }
-    let db = |x: &Action| match *x {
-        Action::Rotate { db, .. } => db,
+    // 새 엔진의 ✓는 |g| ≤ 2.5라, ✓와는 그 범위에서 가장 가까운 값과 잽니다(✓ 경계를 오가는 잡음으로 노트가 뜨지 않게).
+    let gap = |p: &Action, q: &Action| match (p, q) {
+        (Action::Rotate { db: a, .. }, Action::Rotate { db: b, .. }) => (a - b).abs(),
+        (Action::Rotate { db, .. }, _) | (_, Action::Rotate { db, .. }) => db.abs() - OK_RELEASE_DB,
         _ => 0.0,
     };
     a.iter().any(|x| {
@@ -496,7 +498,7 @@ pub fn knobs_differ(a: &[Advice], b: &[Advice]) -> bool {
             // 공칭 대역은 이웃끼리 1.25–1.28배라 한 칸과 두 칸(≥ 1.56배) 사이인 0.5옥타브로 가릅니다.
             (Action::SetFreq { hz: f }, Action::SetFreq { hz: g }) => (f / g).log2().abs() > 0.5,
             (p, q) if matches!(x.control, Control::HighShelf { .. } | Control::Mid { .. } | Control::LowShelf { .. }) => {
-                (db(p) - db(q)).abs() >= 3.0
+                gap(p, q) >= 3.0
             }
             (p, q) => (*p == Action::SwitchOn) != (*q == Action::SwitchOn),
         })
@@ -801,8 +803,10 @@ fn at(k: &[Advice], label: &str) -> Action { k.iter().find(|k| k.label == label)
     };
     let mid = |db| one("MID", Action::Rotate { degrees: 0.0, db });
     let freq = |hz| one("FREQ", Action::SetFreq { hz });
-    assert!(!knobs_differ(&mid(-2.5), &one("", Action::Ok)));
-    assert!(knobs_differ(&mid(-3.0), &one("", Action::Ok)));
+    assert!(!knobs_differ(&mid(-3.0), &mid(-5.5)));
+    assert!(knobs_differ(&mid(-3.0), &mid(-6.0)));
+    assert!(!knobs_differ(&mid(-5.0), &one("", Action::Ok))); // ✓ = |g| ≤ 2.5
+    assert!(knobs_differ(&mid(-5.5), &one("", Action::Ok)));
     assert!(!knobs_differ(&freq(800.0), &freq(1000.0)));
     assert!(!knobs_differ(&freq(125.0), &freq(160.0))); // 이웃 후보: 공칭값이라 1.28배
     assert!(knobs_differ(&freq(800.0), &freq(1250.0)));
