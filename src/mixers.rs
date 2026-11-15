@@ -289,5 +289,12 @@ fn has(g: &ChannelGroup, c: Control) -> bool { g.controls.contains(&c) }
     assert_eq!(x.groups[1].label, "CH9-12 (스테레오 마이크)");
     let mids: Vec<_> = x.groups[1].controls.iter().filter(|c| matches!(c, Mid { .. })).collect();
     assert_eq!(mids, [&Mid { lo_hz: 3_000.0, hi_hz: 3_000.0 }, &Mid { lo_hz: 500.0, hi_hz: 500.0 }]);
+    for m in [MixerModel::BehringerX1222Usb, MixerModel::BehringerQx1222Usb, MixerModel::SoundcraftSignature12, MixerModel::SoundcraftSignature22] {
+        let g = MixerFactory::create(m).groups.pop().unwrap();
+        assert!(g.label.contains("스테레오 마이크") && !g.controls.iter().any(|c| matches!(c, LowCut { .. } | Comp)), "{m:?}");
+    }
+    assert!(has(&MixerFactory::create(MixerModel::SoundcraftSignature12).groups[1], Mid { lo_hz: 1_000.0, hi_hz: 1_000.0 }));
+    assert!(has(&MixerFactory::create(MixerModel::SoundcraftSignature22).groups[1], Mid { lo_hz: 140.0, hi_hz: 3_000.0 }));
+    assert_eq!(MixerFactory::create(MixerModel::MackieProFx22v3).groups[2].label, "CH15-20 (스테레오 마이크)");
 }
 }

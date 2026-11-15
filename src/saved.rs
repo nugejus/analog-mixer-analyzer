@@ -54,7 +54,7 @@ fn parse_line(line: &str) -> Option<Saved> {
 pub fn parse(text: &str) -> (Vec<Saved>, Option<usize>) {
     let (mut list, mut bad) = (vec![], None);
     for (i, line) in text.trim_start_matches('\u{feff}').lines().enumerate().filter(|(_, l)| !l.trim().is_empty()) {
-        match parse_line(line) {
+        match parse_line(line).filter(|_| !line.contains('\u{fffd}')) {
             Some(s) => list.push(s),
             None => _ = bad.get_or_insert(i + 1),
         }
@@ -164,6 +164,12 @@ mod tests {
                            good.split_once('\t').unwrap().1, to_line(&sample("나")));
         assert_eq!(parse(&text), (vec![sample("가"), sample("나")], Some(4)));
         assert_eq!(parse(&format!("\n{good}\n  \n\n")), (vec![sample("가")], None));
+    }
+    #[test] fn badly_encoded_line_is_bad() {
+        let mut b = to_line(&sample("가")).into_bytes();
+        b.extend(b"\n\xb0\xa1\t"); // CP949 '가' and the rest of a line
+        b.extend(to_line(&sample("나")).split_once('\t').unwrap().1.as_bytes());
+        assert_eq!(parse(&String::from_utf8_lossy(&b)), (vec![sample("가")], Some(2)));
     }
     #[test] fn bom_is_stripped() {
         assert_eq!(parse(&format!("\u{feff}{}\n", to_line(&sample("가")))), (vec![sample("가")], None));

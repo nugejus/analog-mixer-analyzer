@@ -108,7 +108,9 @@ fn khz(hz: f32) -> String {
 /// `sample_rate` is the current analysis rate (`None` before the first analysis).
 fn saved_goal(s: &Saved, mixer: &str, group: &str, sample_rate: Option<f32>) -> Goal {
     let mut notes = vec![];
-    if s.mixer != mixer || s.group != group {
+    // 0.3.1의 ProFX22v3 `CH15-18 (스테레오 마이크)`는 지금 `CH15-20`입니다.
+    let same_group = s.group == group || (s.group.as_str(), group) == ("CH15-18 (스테레오 마이크)", "CH15-20 (스테레오 마이크)");
+    if s.mixer != mixer || !same_group {
         notes.push(format!(
             "저장할 때와 믹서/채널이 다릅니다(저장: {} {}). 같은 채널에서 분석해야 맞습니다.",
             s.mixer, s.group
@@ -167,10 +169,13 @@ fn mixer_name(p: &MixerProfile) -> String {
     format!("{} {}", p.brand, p.name)
 }
 
+/// Below this the 16 kHz band is not measured: no knob turns and no saving.
+const MIN_RATE: f32 = 40_000.0;
+
 /// A fresh engine each time, so every knob starts from ✓ (no deadband state carried over).
 /// Below 40 kHz the 16 kHz band is not measured: knob names and one note only (the graph stays).
 fn advise(a: &Analysis, group: &ChannelGroup, goal: &Goal) -> AdviceSet {
-    if a.sample_rate < 40_000.0 {
+    if a.sample_rate < MIN_RATE {
         let note = format!(
             "입력 샘플레이트가 {}kHz라 16kHz 대역까지 잴 수 없습니다. 믹서 USB 입력(44.1kHz 이상)을 고르세요.",
             khz(a.sample_rate)
@@ -392,6 +397,9 @@ impl App {
 
     /// Writes the saved list; a failure shows in red under 안내 and the list stays in memory.
     fn persist(&mut self) {
+        if self.write_blocked && self.save_error.is_some() {
+            return; // 줄 번호가 있는 안내를 그대로 둡니다
+        }
         let r = write_list(self.dir.as_deref(), self.write_blocked, &self.saved);
         self.save_error = r.err().map(|e| format!("저장하지 못했습니다: {e}"));
     }
@@ -485,7 +493,7 @@ impl App {
                 }
             }
         }
-        let summary = self.analysis.as_ref().and_then(|a| a.summary.as_ref());
+        let summary = self.analysis.as_ref().filter(|a| a.sample_rate >= MIN_RATE).and_then(|a| a.summary.as_ref());
         let Some(name) = &mut self.naming else {
             if ui.add_enabled(summary.is_some(), egui::Button::new("이 소리 저장")).clicked() {
                 self.naming = Some(String::new());
@@ -1508,6 +1516,10 @@ mod tests {
         assert_eq!(saved_goal(&old, "m", "g", Some(48_000.0)).notes,
                    ["이 소리는 이전 버전에서 저장해 저음 쪽 값이 조금 다릅니다. 같은 마이크·채널로 다시 저장해 주세요."]);
         assert_eq!([khz(96_000.0), khz(22_050.0)], ["96", "22.1"]);
+    }
+    #[test] fn old_profx22v3_stereo_label_is_the_same_group() {
+        let s = Saved { group: "CH15-18 (스테레오 마이크)".into(), ..saved_sample("x") };
+        assert!(saved_goal(&s, &s.mixer.clone(), "CH15-20 (스테레오 마이크)", Some(48_000.0)).notes.is_empty());
     }
     #[test] fn restore_from_saved_says_switch_off() {
         let g = &MixerFactory::create(MixerModel::MackieProFx22v3).groups[0];
