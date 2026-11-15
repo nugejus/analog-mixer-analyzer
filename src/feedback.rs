@@ -41,7 +41,8 @@ impl FeedbackDetector {
             let steady = self.run > 0 && k.abs_diff(self.k) <= 2 && (d - self.k_db).abs() <= 2.0;
             self.run = if steady { self.run + 1 } else { 1 };
             (self.k, self.k_db) = (k, d);
-            broken = !steady;
+            // a fresh onset while idle is a run start, not a miss
+            broken = !steady && self.active;
         }
         if broken {
             self.miss += 1;
@@ -114,5 +115,21 @@ mod tests {
         let mut x = mix(&sine(48_000.0, 2500.0, 0.3, 1.5), &noise(72_000, 0.001));
         x.extend(noise(48_000, 0.001));
         assert_eq!(*run(&x).last().unwrap(), None);
+    }
+    #[test]
+    fn detects_tone_after_noise() {
+        let mut x = noise(48_000, 0.1);
+        x.extend(mix(&sine(48_000.0, 2500.0, 0.3, 1.5), &noise(72_000, 0.001)));
+        let hz = run(&x).last().copied().flatten().expect("detected");
+        assert!((hz - 2500.0).abs() < 25.0);
+    }
+    #[test]
+    fn redetects_after_release() {
+        let tone = || mix(&sine(48_000.0, 2500.0, 0.3, 1.5), &noise(72_000, 0.001));
+        let mut x = tone();
+        x.extend(noise(48_000, 0.001));
+        x.extend(tone());
+        let r = run(&x);
+        assert!(r.last().unwrap().is_some());
     }
 }
