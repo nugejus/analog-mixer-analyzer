@@ -253,8 +253,10 @@ impl AdviceEngine {
                     h[i] = f;
                     fit_eq(&d, &shapes(&h)).2
                 };
+                // 두 스윕이 같은 주파수에서 게인을 반씩 나누면 둘 다 ✓가 되므로 1옥타브 이상 떨어뜨립니다.
                 let best = cands(sweep(ctl[i]).expect("sweep"))
                     .into_iter()
+                    .filter(|&f| sweeps.iter().all(|&j| j == i || (f / hz[j]).log2().abs() >= 1.0))
                     .map(|f| (f, resid(f)))
                     .min_by(|a, b| a.1.total_cmp(&b.1));
                 if let Some((f, r)) = best
@@ -455,6 +457,12 @@ const FX12: MixerModel = MixerModel::MackieProFx12v3;
     let mut e = AdviceEngine::new();
     assert_eq!(run(&mut e, &group(V3, 0), &summary(|_| 0.0)).knobs.len(), 7);
     assert_eq!(run(&mut e, &group(MixerModel::YamahaMg06x, 0), &summary(|_| 0.0)).knobs.len(), 4);
+}
+#[test] fn signature22_sweeps_do_not_split_one_bump() {
+    let a = run(&mut AdviceEngine::new(), &group(MixerModel::SoundcraftSignature22, 0), &summary(|f| 4.0 * Shape::Bell(1_000.0).response(f)));
+    let mids: Vec<f32> = ["MID 1", "MID 2"].iter().filter_map(|&l| match act(&a, l) { Action::Rotate { degrees, .. } => Some(degrees), _ => None }).collect();
+    assert_eq!(mids.len(), 1, "{:?}", a.knobs);
+    assert!((-45.0..=-35.0).contains(&mids[0]), "{mids:?}");
 }
 #[test] fn rounding_and_labels() {
     assert_eq!(rotate_degrees(1.6, 10.0), 15.0);
