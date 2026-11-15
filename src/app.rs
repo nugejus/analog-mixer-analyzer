@@ -85,6 +85,7 @@ fn advise(a: &Analysis, group: &ChannelGroup, voice: Voice) -> AdviceSet {
             clipped_recently: a.clipped,
             feedback_hz: a.howl,
             silent: a.silent,
+            restore_dynamic_range_db: None,
         },
     )
 }
@@ -547,6 +548,7 @@ fn caption(k: &Advice) -> Vec<(String, Color32)> {
         Action::Ok if k.label.starts_with("FREQ") => one("✓ 그대로".into(), mocha::GREEN),
         Action::Ok => one("✓".into(), mocha::GREEN),
         Action::SwitchOn => one("켜기 권장".into(), mocha::SAPPHIRE),
+        Action::SwitchOff => one("끄기 권장".into(), mocha::SAPPHIRE),
         Action::SetFreq { hz } => one(format!("{} 눈금에", fmt_hz(hz)), mocha::YELLOW),
         Action::Rotate { degrees, db } => {
             let dir = if degrees > 0.0 {
@@ -839,6 +841,14 @@ mod tests {
                 Action::SwitchOn
             ),
             ["켜기 권장"]
+        );
+        assert_eq!(
+            text(
+                "저역컷 100Hz",
+                Control::LowCut { hz: 100.0 },
+                Action::SwitchOff
+            ),
+            ["끄기 권장"]
         );
         assert_eq!(text("GAIN", gain, Action::Wait), ["—"]);
     }

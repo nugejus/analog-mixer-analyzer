@@ -2,7 +2,7 @@
 
 use crate::mixers::{ChannelGroup, Control, EQ_RANGE_DB, KNOB_TRAVEL_DEG};
 use crate::speech::Summary;
-use crate::target::BANDS_HZ;
+use crate::target::{BANDS_HZ, hpf_db};
 
 const LAMBDA: f32 = 0.01;
 const FIT_BANDS: std::ops::RangeInclusive<usize> = 2..=23; // 100 Hz–12.5 kHz
@@ -97,6 +97,7 @@ pub enum Action {
         hz: f32,
     },
     SwitchOn,
+    SwitchOff,
 }
 
 #[derive(Clone, Debug)]
@@ -119,6 +120,8 @@ pub struct Inputs<'a> {
     pub clipped_recently: bool,
     pub feedback_hz: Option<f32>,
     pub silent: bool,
+    /// `Some(저장 DR)`이면 복구 모드.
+    pub restore_dynamic_range_db: Option<f32>,
 }
 
 /// 5° 단위로 반올림한 회전 각도.
@@ -211,8 +214,33 @@ impl AdviceEngine {
                 };
             }
         };
-        let d: [f32; 25] = std::array::from_fn(|b| s.bands_db[b] - inp.target[b]);
+        let mut d: [f32; 25] = std::array::from_fn(|b| s.bands_db[b] - inp.target[b]);
         let ctl = &group.controls;
+        let restore = inp.restore_dynamic_range_db;
+
+        // 저역컷은 반영 전 d로 판단하고(복구 모드만 양방향), 켜기/끄기면 그 스위치 응답을 d에 반영해
+        // 같은 저역 차이를 LOW가 또 쫓지 않게 합니다. +1 켜기, −1 끄기, 0 그대로.
+        let mean = |d: &[f32; 25], r: std::ops::RangeInclusive<usize>| {
+            d[r.clone()].iter().sum::<f32>() / r.count() as f32
+        };
+        // 보통은 c0(250 Hz–4 kHz), 복구는 125·160 Hz 기준.
+        let base = if restore.is_some() { 3..=4 } else { 6..=18 };
+        let low = mean(&d, 0..=1) - mean(&d, base);
+        let switch = if low > 3.0 {
+            1.0
+        } else if restore.is_some() && low < -3.0 {
+            -1.0
+        } else {
+            0.0
+        };
+        if let Some(fc) = ctl.iter().find_map(|&c| match c {
+            Control::LowCut { hz } => Some(hz),
+            _ => None,
+        }) {
+            for (x, f) in d.iter_mut().zip(BANDS_HZ) {
+                *x += switch * hpf_db(fc, f);
+            }
+        }
 
         // EQ 노브와 각 노브의 Bell 주파수(스윕은 지난 추천, 없으면 후보 가운데).
         let eq: Vec<usize> = (0..ctl.len())
@@ -279,7 +307,7 @@ impl AdviceEngine {
         let mut main = vec![Action::Ok; ctl.len()];
         let mut freq_act = vec![Action::Ok; ctl.len()];
         for (&i, &g) in eq.iter().zip(&gains) {
-            let max = if matches!(ctl[i], Control::LowShelf { .. }) {
+            let max = if restore.is_none() && matches!(ctl[i], Control::LowShelf { .. }) {
                 LOW_BOOST_MAX_DB
             } else {
                 EQ_LIMIT_DB
@@ -300,8 +328,16 @@ impl AdviceEngine {
             }
         }
 
-        let mean = |r: std::ops::RangeInclusive<usize>| d[r.clone()].iter().sum::<f32>() / r.count() as f32;
-        let c0 = mean(6..=18); // 250 Hz–4 kHz
+        // ponytail: COMP는 다이내믹 레인지/크레스트만 보는 ±30° 고정 휴리스틱입니다.
+        // 실제 threshold/ratio와 압축량은 모릅니다. 게인 리덕션을 추정할 수 있게 되면 각도를 계산하세요.
+        let comp = match restore {
+            Some(saved) if s.dynamic_range_db - saved > 4.0 => 30.0,
+            Some(saved) if s.dynamic_range_db - saved < -4.0 => -30.0,
+            Some(_) => 0.0,
+            None if s.crest_db < 9.0 => -30.0,
+            None if s.dynamic_range_db > 18.0 => 30.0,
+            None => 0.0,
+        };
         let overload = s.crest_db < 9.0 && s.peak_db > -20.0;
         for (i, &control) in ctl.iter().enumerate() {
             main[i] = match control {
@@ -318,14 +354,12 @@ impl AdviceEngine {
                         db,
                     }
                 }
-                Control::LowCut { .. } if mean(0..=1) - c0 > 3.0 => Action::SwitchOn,
-                // ponytail: COMP는 다이내믹 레인지/크레스트만 보는 ±30° 고정 휴리스틱입니다.
-                // 실제 threshold/ratio와 압축량은 모릅니다. 게인 리덕션을 추정할 수 있게 되면 각도를 계산하세요.
-                Control::Comp if s.crest_db < 9.0 => Action::Rotate {
-                    degrees: -30.0,
+                Control::LowCut { .. } if switch > 0.0 => Action::SwitchOn,
+                Control::LowCut { .. } if switch < 0.0 => Action::SwitchOff,
+                Control::Comp if comp != 0.0 => Action::Rotate {
+                    degrees: comp,
                     db: 0.0,
                 },
-                Control::Comp if s.dynamic_range_db > 18.0 => Action::Rotate { degrees: 30.0, db: 0.0 },
                 _ => continue,
             };
         }
@@ -367,7 +401,7 @@ fn summary(dev: impl Fn(f32) -> f32) -> Summary {
 }
 fn run(e: &mut AdviceEngine, g: &ChannelGroup, s: &Summary) -> AdviceSet {
     let t = ltass_db(Voice::Male);
-    e.advise(g, &Inputs { summary: Some(s), target: &t, clipped_recently: false, feedback_hz: None, silent: false })
+    e.advise(g, &Inputs { summary: Some(s), target: &t, clipped_recently: false, feedback_hz: None, silent: false, restore_dynamic_range_db: None })
 }
 fn act(a: &AdviceSet, label: &str) -> Action { a.knobs.iter().find(|k| k.label == label).unwrap().action.clone() }
 fn db_of(a: Action) -> f32 { match a { Action::Rotate { db, .. } => db, x => panic!("{x:?}") } }
@@ -385,7 +419,9 @@ const FX12: MixerModel = MixerModel::MackieProFx12v3;
     assert!(a.knobs.iter().all(|k| k.action == Action::Ok), "{:?}", a.knobs);
 }
 #[test] fn low_boom_turns_low_ccw() {
-    let a = run(&mut AdviceEngine::new(), &group(V3, 0), &summary(|f| 6.0 * Shape::LowShelf(80.0).response(f)));
+    // 저역컷 문턱(mean(63,80) − c0 > 3) 아래의 붐. 6 dB면 3.23이라 스위치가 켜집니다.
+    let a = run(&mut AdviceEngine::new(), &group(V3, 0), &summary(|f| 5.0 * Shape::LowShelf(80.0).response(f)));
+    assert_eq!(act(&a, "저역컷 100Hz"), Action::Ok);
     let d = db_of(act(&a, "LOW 80Hz"));
     assert!((-7.5..=-3.0).contains(&d), "{d}");
     assert_eq!(act(&a, "HIGH 12kHz"), Action::Ok);
@@ -402,13 +438,14 @@ const FX12: MixerModel = MixerModel::MackieProFx12v3;
 #[test] fn rumble_recommends_lowcut() {
     let a = run(&mut AdviceEngine::new(), &group(V3, 0), &summary(|f| if f < 90.0 { 12.0 } else { 0.0 }));
     assert_eq!(act(&a, "저역컷 100Hz"), Action::SwitchOn);
-    assert_eq!(act(&a, "LOW 80Hz"), Action::Ok);
+    // 스위치가 100·125·160 Hz에서 깎는 만큼(−3.0/−1.5/−0.6 dB)을 LOW가 채우되 부스트 상한 +3 dB.
+    assert_eq!(act(&a, "LOW 80Hz"), Action::Rotate { degrees: 30.0, db: 3.0 });
 }
 #[test] fn clip_turns_gain_down() {
     let mut s = summary(|f| 20.0 * Shape::Bell(3_000.0).response(f));
     s.peak_db = -2.0;
     let t = ltass_db(Voice::Male);
-    let a = AdviceEngine::new().advise(&group(V3, 0), &Inputs { summary: Some(&s), target: &t, clipped_recently: true, feedback_hz: None, silent: false });
+    let a = AdviceEngine::new().advise(&group(V3, 0), &Inputs { summary: Some(&s), target: &t, clipped_recently: true, feedback_hz: None, silent: false, restore_dynamic_range_db: None });
     assert_eq!(act(&a, "GAIN"), Action::Rotate { degrees: -50.0, db: -10.0 });
     for k in &a.knobs { if let Action::Rotate { degrees, db } = k.action { assert!(degrees.is_finite() && db.is_finite() && db.abs() <= 20.0); } }
     for k in a.knobs.iter().filter(|k| k.label != "GAIN") { if let Action::Rotate { db, .. } = k.action { assert!(db.abs() <= 15.0); } }
@@ -445,17 +482,17 @@ const FX12: MixerModel = MixerModel::MackieProFx12v3;
     let mut s = summary(|_| 0.0);
     s.snr_db = 20.0;
     let t = ltass_db(Voice::Male);
-    let a = AdviceEngine::new().advise(&group(V3, 0), &Inputs { summary: Some(&s), target: &t, clipped_recently: false, feedback_hz: Some(2_500.0), silent: false });
+    let a = AdviceEngine::new().advise(&group(V3, 0), &Inputs { summary: Some(&s), target: &t, clipped_recently: false, feedback_hz: Some(2_500.0), silent: false, restore_dynamic_range_db: None });
     assert!(a.notes.iter().any(|n| n.contains("2.5kHz")));
     assert!(a.notes.iter().any(|n| n.contains("마이크를")));
 }
 #[test] fn silent_input_waits() {
     let t = ltass_db(Voice::Male);
     let mut e = AdviceEngine::new();
-    let a = e.advise(&group(V3, 0), &Inputs { summary: None, target: &t, clipped_recently: false, feedback_hz: None, silent: true });
+    let a = e.advise(&group(V3, 0), &Inputs { summary: None, target: &t, clipped_recently: false, feedback_hz: None, silent: true, restore_dynamic_range_db: None });
     assert!(a.knobs.iter().all(|k| k.action == Action::Wait));
     assert!(a.notes.iter().any(|n| n.contains("입력 신호가 없습니다")));
-    let b = e.advise(&group(V3, 0), &Inputs { summary: None, target: &t, clipped_recently: false, feedback_hz: None, silent: false });
+    let b = e.advise(&group(V3, 0), &Inputs { summary: None, target: &t, clipped_recently: false, feedback_hz: None, silent: false, restore_dynamic_range_db: None });
     assert!(b.notes.iter().any(|n| n.contains("말소리가 부족합니다")));
 }
 #[test] fn group_change_resets_state() {
@@ -468,6 +505,46 @@ const FX12: MixerModel = MixerModel::MackieProFx12v3;
     let mids: Vec<f32> = ["MID 1", "MID 2"].iter().filter_map(|&l| match act(&a, l) { Action::Rotate { degrees, .. } => Some(degrees), _ => None }).collect();
     assert_eq!(mids.len(), 1, "{:?}", a.knobs);
     assert!((-45.0..=-35.0).contains(&mids[0]), "{mids:?}");
+}
+fn run_t(g: &ChannelGroup, s: &Summary, target: [f32; 25], restore: Option<f32>) -> AdviceSet {
+    AdviceEngine::new().advise(g, &Inputs { summary: Some(s), target: &target, clipped_recently: false, feedback_hz: None, silent: false, restore_dynamic_range_db: restore })
+}
+fn with(dev: impl Fn(f32) -> f32) -> [f32; 25] { let t = ltass_db(Voice::Male); std::array::from_fn(|b| t[b] + dev(BANDS_HZ[b])) }
+#[test] fn hpf_db_values() {
+    assert!((hpf_db(100.0, 100.0) + 3.01).abs() < 0.01 && (hpf_db(100.0, 50.0) + 12.30).abs() < 0.01 && hpf_db(100.0, 1000.0) > -0.001);
+}
+#[test] fn preset_hpf_switch_not_chased_by_low() {
+    let a = run_t(&group(V3, 0), &summary(|_| 0.0), with(|f| hpf_db(100.0, f)), None);
+    assert_eq!(act(&a, "저역컷 100Hz"), Action::SwitchOn);
+    assert_eq!(act(&a, "LOW 80Hz"), Action::Ok);
+}
+#[test] fn switch_already_on_is_quiet() {
+    let a = run_t(&group(V3, 0), &summary(|f| hpf_db(100.0, f)), with(|f| hpf_db(100.0, f)), None);
+    assert!(a.knobs.iter().all(|k| k.action == Action::Ok), "{:?}", a.knobs);
+}
+#[test] fn normal_mode_never_switches_off() {
+    assert_eq!(act(&run_t(&group(V3, 0), &summary(|f| hpf_db(100.0, f)), with(|_| 0.0), None), "저역컷 100Hz"), Action::Ok);
+}
+#[test] fn restore_switch_both_ways() {
+    let off = run_t(&group(V3, 0), &summary(|f| hpf_db(100.0, f)), with(|_| 0.0), Some(10.0));
+    assert_eq!(act(&off, "저역컷 100Hz"), Action::SwitchOff);
+    assert_eq!(act(&off, "LOW 80Hz"), Action::Ok);
+    let on = run_t(&group(V3, 0), &summary(|_| 0.0), with(|f| hpf_db(100.0, f)), Some(10.0));
+    assert_eq!(act(&on, "저역컷 100Hz"), Action::SwitchOn);
+    assert_eq!(act(&on, "LOW 80Hz"), Action::Ok);
+}
+#[test] fn restore_lifts_low_boost_cap() {
+    let t = with(|f| 6.0 * Shape::LowShelf(80.0).response(f));
+    assert!(db_of(act(&run_t(&group(FX12, 0), &summary(|_| 0.0), t, Some(10.0)), "LOW 80Hz")) >= 4.5);
+    assert!(db_of(act(&run_t(&group(FX12, 0), &summary(|_| 0.0), t, None), "LOW 80Hz")) <= 3.0);
+}
+#[test] fn restore_comp_follows_saved_dynamic_range() {
+    let mut s = summary(|_| 0.0); // dynamic_range_db 10
+    s.crest_db = 7.0; s.peak_db = -10.0; // 보통 모드라면 반시계 30°
+    let comp = |saved| act(&run_t(&group(V3, 0), &s, with(|_| 0.0), Some(saved)), "COMP");
+    assert_eq!(comp(4.0), Action::Rotate { degrees: 30.0, db: 0.0 });
+    assert_eq!(comp(16.0), Action::Rotate { degrees: -30.0, db: 0.0 });
+    assert_eq!(comp(12.0), Action::Ok);
 }
 #[test] fn rounding_and_labels() {
     assert_eq!(rotate_degrees(1.6, 10.0), 15.0);

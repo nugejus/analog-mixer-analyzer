@@ -10,6 +10,11 @@ pub enum Voice {
     Female,
 }
 
+/// 2차 하이패스(12 dB/옥타브) 응답: −10·log10(1 + (fc/f)^4).
+pub fn hpf_db(fc: f32, hz: f32) -> f32 {
+    -10.0 * (1.0 + (fc / hz).powi(4)).log10()
+}
+
 /// Byrne 1994 LTASS, 1/3-octave dB.
 pub fn ltass_db(voice: Voice) -> [f32; 25] {
     match voice {
