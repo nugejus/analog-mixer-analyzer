@@ -21,7 +21,7 @@
 - 피크 선 색 `mocha::SURFACE2`, 다른 선보다 먼저 그린다.
 - move 식: hpf(fc) = −10·log10(1+(fc/f)^4); low_shelf(fc,g) = g/(1+(f/fc)²); high_shelf(fc,g) = g/(1+(fc/f)²); bell(fc,g,w) = g·exp(−log2(f/fc)²/(2σ²)), σ = w/(2√(2ln2)), w=0이면 σ=0.6.
 - bell이 남는 조건: 스윕 MID lo ≤ hz ≤ hi, 또는 고정 MID f0에서 |log2(hz/f0)| ≤ 0.7. 셸프는 해당 셸프가 있을 때만. hpf는 항상(그룹에 `LowCut{hz}`가 있으면 그 hz로).
-- 복구 모드만: 저역컷 < −3 → `끄기 권장`, LOW 부스트 상한 15 dB, COMP는 (지금 DR − 저장 DR) > 4 → +30°, < −4 → −30°.
+- 복구 모드만: 저역컷 판단 값 = mean(d[0..=1]) − mean(d[3..=4]) (63·80 Hz − 125·160 Hz, c0 대신), > 3 → `켜기 권장`, < −3 → `끄기 권장`; LOW 부스트 상한 15 dB, COMP는 (지금 DR − 저장 DR) > 4 → +30°, < −4 → −30°.
 - 저장 파일: macOS `$HOME/Library/Application Support/MixerAnalyzer/saved.tsv`, Windows `%APPDATA%\MixerAnalyzer\saved.tsv`, 그 밖 `$HOME/.local/share/MixerAnalyzer/saved.tsv`. 탭 구분 29칸: 이름, 믹서, 채널그룹, dynamic_range_db, 밴드 25개(`{:.2}`).
 - `scripts/`, `packaging/`는 건드리지 않는다.
 
@@ -285,7 +285,7 @@ Expected: 컴파일 실패(`hpf_db`, `restore_dynamic_range_db`, `SwitchOff` 없
 
 - [ ] **Step 3: Implement**
 
-`advise` 순서: d 계산 → 저역컷 판단(반영 전 d, 지금 식 mean(d[0..=1]) − c0, c0 = mean(d[6..=18])) → 켜기면 d[b] += hpf_db(스위치hz, BANDS_HZ[b]), 끄기면 d[b] −= 같은 값 → 스윕 탐색과 EQ 맞춤은 고친 d로 → 나머지(GAIN·COMP·안내)는 지금처럼. 복구 모드에서만: 끄기 판단(< −3), LOW 상한 `EQ_LIMIT_DB`, COMP는 DR 비교 규칙(크레스트/다이내믹 규칙 대신; 과부하 안내는 그대로). app.rs `advise()`는 `restore_dynamic_range_db: None`(Task 5에서 채움).
+`advise` 순서: d 계산 → 저역컷 판단(반영 전 d, 지금 식 mean(d[0..=1]) − c0, c0 = mean(d[6..=18])) → 켜기면 d[b] += hpf_db(스위치hz, BANDS_HZ[b]), 끄기면 d[b] −= 같은 값 → 스윕 탐색과 EQ 맞춤은 고친 d로 → 나머지(GAIN·COMP·안내)는 지금처럼. 복구 모드에서만: 저역컷 판단 값을 mean(d[0..=1]) − mean(d[3..=4])로 바꾸고 켜기(> 3)·끄기(< −3) 둘 다, LOW 상한 `EQ_LIMIT_DB`, COMP는 DR 비교 규칙(크레스트/다이내믹 규칙 대신; 과부하 안내는 그대로). app.rs `advise()`는 `restore_dynamic_range_db: None`(Task 4가 `goal.restore_dr`로 바꿈).
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -314,7 +314,7 @@ git commit -m "feat: low-cut aware fit and restore mode"
   - `pub struct Preset { pub category: &'static str, pub name: &'static str, pub when: &'static str, pub moves: &'static [Move] }`, `pub const PRESETS: [Preset; 6]` (순서·문구는 spec "세팅 표" 그대로, 0번 = 기본)
   - `pub fn move_db(m: &Move, hz: f32) -> f32`
   - `pub fn preset_target(p: &Preset, voice: Voice, group: &ChannelGroup) -> ([f32; 25], Vec<f32>)` (목표, 뺀 move의 hz)
-  - app.rs: `struct Goal { db: [f32; 25], notes: Vec<String>, restore_dr: Option<f32> }`, `fn preset_goal(i: usize, voice: Voice, group: &ChannelGroup) -> Goal`, `fn advise(a: &Analysis, group: &ChannelGroup, goal: &Goal) -> AdviceSet` (엔진 안내 뒤에 `goal.notes`를 붙인다), `App.preset: usize`(기본 0)
+  - app.rs: `struct Goal { db: [f32; 25], notes: Vec<String>, restore_dr: Option<f32> }`, `fn preset_goal(i: usize, voice: Voice, group: &ChannelGroup) -> Goal`, `fn advise(a: &Analysis, group: &ChannelGroup, goal: &Goal) -> AdviceSet` (`restore_dynamic_range_db: goal.restore_dr`, 엔진 안내 뒤에 `goal.notes`를 붙인다), `App.preset: usize`(기본 0)
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -502,7 +502,6 @@ Expected: 컴파일 실패(`saved` 모듈 없음).
   - `saved_goal`: db = bands, restore_dr = Some(DR), 믹서나 채널이 다르면 안내 한 줄(테스트 문구).
   - `이 소리 저장`(분석 요약이 있을 때만 켜짐) → 이름 입력칸 + `저장`/`취소`. `clean(이름)`이 비면 `저장` 꺼짐. 저장 = `upsert(Saved{clean(이름), "{brand} {name}", 그룹 라벨, summary.dynamic_range_db, summary.bands_db})` 후 `store`, 목표는 그대로 두되 다시 계산. 실패나 경로 없음 → 안내 줄에 빨간 `저장하지 못했습니다: {오류}`(경로 없음 = `저장 폴더를 찾을 수 없습니다`), 성공하면 지움.
   - `삭제`: 저장한 세팅을 고른 동안만. 첫 클릭 → `정말 삭제`, 둘째 클릭 → 지우고 `store`, 목표 `Pick::Preset(0)`. 목표를 바꾸면 확인 풀림.
-  - `advise()`의 `restore_dynamic_range_db`에 `goal.restore_dr`.
 - README "화면 읽는 법": 해상도, 표시 체크박스, 노브 구간 막대, 피크 선 색(어두운 회색), 목표 메뉴(분류와 세팅, 남성/여성), 저장·복구·삭제(같은 사람·같은 마이크, GAIN은 복구 안 함, 스위치 켜기/끄기 권장), 저장 파일 위치(macOS/Windows), "채널 스트립 사진도 찍어 두세요".
 
 - [ ] **Step 4: Run tests to verify they pass**
