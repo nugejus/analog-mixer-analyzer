@@ -1070,7 +1070,6 @@ fn caption(k: &Advice) -> Vec<(String, Color32)> {
         Action::Ok if k.label.starts_with("FREQ") => one("✓ 그대로".into(), mocha::GREEN),
         Action::Ok => one("✓".into(), mocha::GREEN),
         Action::SwitchOn => one("켜기 권장".into(), mocha::SAPPHIRE),
-        Action::SwitchOff => one("끄기 권장".into(), mocha::SAPPHIRE),
         Action::SetFreq { hz } => one(format!("{} 눈금에", fmt_hz(hz)), mocha::YELLOW),
         Action::Rotate { degrees, db } => {
             let dir = if degrees > 0.0 {
@@ -1381,11 +1380,11 @@ mod tests {
                 "COMP",
                 Control::Comp,
                 Action::Rotate {
-                    degrees: -30.0,
+                    degrees: 30.0,
                     db: 0.0
                 }
             ),
-            ["반시계 30°"]
+            ["시계방향 30°"]
         );
         assert_eq!(
             text("FREQ", mid, Action::SetFreq { hz: 400.0 }),
@@ -1400,14 +1399,6 @@ mod tests {
                 Action::SwitchOn
             ),
             ["켜기 권장"]
-        );
-        assert_eq!(
-            text(
-                "저역컷 100Hz",
-                Control::LowCut { hz: 100.0 },
-                Action::SwitchOff
-            ),
-            ["끄기 권장"]
         );
         assert_eq!(text("GAIN", gain, Action::Wait), ["—"]);
     }
@@ -1591,13 +1582,13 @@ mod tests {
         assert!(saved_goal(&s, &s.mixer.clone(), "CH15-20 (스테레오 마이크)", Some(48_000.0)).notes.is_empty());
         assert_eq!(saved_goal(&s, "Mackie ProFX22 (1세대, 2011)", "CH15-20 (스테레오 마이크)", Some(48_000.0)).notes.len(), 1);
     }
-    #[test] fn restore_from_saved_says_switch_off() {
+    #[test] fn restore_from_saved_says_switch_on() {
         let g = &MixerFactory::create(MixerModel::MackieProFx22v3).groups[0];
-        let saved_now = natural(|_| 0.0); // 저장 때: 스위치 꺼짐
+        let saved_now = natural(|f| hpf_db(100.0, f)); // 저장 때: 스위치 켜짐
         let s = Saved { name: "x".into(), mixer: "m".into(), group: g.label.into(),
                         dynamic_range_db: 10.0, bands_db: saved_now.summary.as_ref().unwrap().bands_db, sample_rate: Some(48_000) };
-        let a = advise(&natural(|f| hpf_db(100.0, f)), g, &saved_goal(&s, "m", g.label, Some(48_000.0))); // 지금: 켜짐
-        assert_eq!(knob(&a, "저역컷 100Hz"), Action::SwitchOff);
+        let a = advise(&natural(|_| 0.0), g, &saved_goal(&s, "m", g.label, Some(48_000.0))); // 지금: 꺼짐(가운데에서 시작)
+        assert_eq!(knob(&a, "저역컷 100Hz"), Action::SwitchOn);
     }
 
     fn saved_sample(name: &str) -> Saved {

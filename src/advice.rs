@@ -98,7 +98,6 @@ pub enum Action {
         hz: f32,
     },
     SwitchOn,
-    SwitchOff,
 }
 
 #[derive(Clone, Debug)]
@@ -219,21 +218,15 @@ impl AdviceEngine {
         let ctl = &group.controls;
         let restore = inp.restore_dynamic_range_db;
 
-        // 저역컷은 반영 전 d로 판단하고(복구 모드만 양방향), 켜기/끄기면 그 스위치 응답을 d에 반영해
-        // 같은 저역 차이를 LOW가 또 쫓지 않게 합니다. +1 켜기, −1 끄기, 0 그대로.
+        // 저역컷은 반영 전 d로 판단하고(분석은 꺼짐에서 시작하므로 켜기만), 켜기면 그 스위치 응답을 d에 반영해
+        // 같은 저역 차이를 LOW가 또 쫓지 않게 합니다. +1 켜기, 0 그대로.
         let mean = |d: &[f32; 25], r: std::ops::RangeInclusive<usize>| {
             d[r.clone()].iter().sum::<f32>() / r.count() as f32
         };
         // 보통은 c0(250 Hz–4 kHz), 복구는 125·160 Hz 기준.
         let base = if restore.is_some() { 3..=4 } else { 6..=18 };
         let low = mean(&d, 0..=1) - mean(&d, base);
-        let switch = if low > 3.0 {
-            1.0
-        } else if restore.is_some() && low < -3.0 {
-            -1.0
-        } else {
-            0.0
-        };
+        let switch = if low > 3.0 { 1.0 } else { 0.0 };
         if let Some(fc) = ctl.iter().find_map(|&c| match c {
             Control::LowCut { hz } => Some(hz),
             _ => None,
@@ -353,15 +346,11 @@ impl AdviceEngine {
             }
         }
 
-        // ponytail: COMP는 다이내믹 레인지/크레스트만 보는 ±30° 고정 휴리스틱입니다.
-        // 실제 threshold/ratio와 압축량은 모릅니다. 게인 리덕션을 추정할 수 있게 되면 각도를 계산하세요.
+        // ponytail: COMP는 다이내믹 레인지/크레스트만 보는 +30° 고정 휴리스틱입니다(분석은 COMP 꺼짐에서
+        // 시작하므로 시계방향만). 실제 threshold/ratio와 압축량은 모릅니다. 게인 리덕션을 추정할 수 있게 되면 각도를 계산하세요.
         let comp = match restore {
-            Some(saved) if s.dynamic_range_db - saved > 4.0 => 30.0,
-            Some(saved) if s.dynamic_range_db - saved < -4.0 => -30.0,
-            Some(_) => 0.0,
-            None if s.crest_db < 9.0 => -30.0,
-            None if s.dynamic_range_db > 18.0 => 30.0,
-            None => 0.0,
+            Some(saved) => s.dynamic_range_db - saved > 4.0,
+            None => s.crest_db >= 9.0 && s.dynamic_range_db > 18.0,
         };
         let overload = s.crest_db < 9.0 && s.peak_db > -20.0;
         for (i, &control) in ctl.iter().enumerate() {
@@ -380,9 +369,8 @@ impl AdviceEngine {
                     }
                 }
                 Control::LowCut { .. } if switch > 0.0 => Action::SwitchOn,
-                Control::LowCut { .. } if switch < 0.0 => Action::SwitchOff,
-                Control::Comp if comp != 0.0 => Action::Rotate {
-                    degrees: comp,
+                Control::Comp if comp => Action::Rotate {
+                    degrees: 30.0,
                     db: 0.0,
                 },
                 _ => continue,
@@ -503,10 +491,11 @@ const FX12: MixerModel = MixerModel::MackieProFx12v3;
     let mut s = summary(|_| 0.0);
     s.dynamic_range_db = 22.0;
     assert_eq!(act(&run(&mut AdviceEngine::new(), &group(V3, 0), &s), "COMP"), Action::Rotate { degrees: 30.0, db: 0.0 });
+    // 낮은 크레스트: 분석은 COMP 꺼짐에서 시작하므로 반시계는 없고 과부하 안내만 남습니다.
     s.crest_db = 7.0; s.peak_db = -10.0;
     let a = run(&mut AdviceEngine::new(), &group(V3, 0), &s);
-    assert_eq!(act(&a, "COMP"), Action::Rotate { degrees: -30.0, db: 0.0 });
-    assert!(a.notes.iter().any(|n| n.contains("과부하")));
+    assert_eq!(act(&a, "COMP"), Action::Ok);
+    assert!(a.notes.iter().any(|n| n == OVERLOAD));
 }
 #[test] fn notes_for_feedback_and_snr() {
     let mut s = summary(|_| 0.0);
@@ -555,10 +544,10 @@ fn with(dev: impl Fn(f32) -> f32) -> [f32; 25] { let t = ltass_db(Voice::Male); 
 #[test] fn normal_mode_never_switches_off() {
     assert_eq!(act(&run_t(&group(V3, 0), &summary(|f| hpf_db(100.0, f)), with(|_| 0.0), None), "저역컷 100Hz"), Action::Ok);
 }
-#[test] fn restore_switch_both_ways() {
+#[test] fn restore_switch_only_on() {
+    // 저장 때 꺼짐, 지금 켜짐이어도 끄라고 하지 않습니다(분석은 꺼짐에서 시작).
     let off = run_t(&group(V3, 0), &summary(|f| hpf_db(100.0, f)), with(|_| 0.0), Some(10.0));
-    assert_eq!(act(&off, "저역컷 100Hz"), Action::SwitchOff);
-    assert_eq!(act(&off, "LOW 80Hz"), Action::Ok);
+    assert_eq!(act(&off, "저역컷 100Hz"), Action::Ok);
     let on = run_t(&group(V3, 0), &summary(|_| 0.0), with(|f| hpf_db(100.0, f)), Some(10.0));
     assert_eq!(act(&on, "저역컷 100Hz"), Action::SwitchOn);
     assert_eq!(act(&on, "LOW 80Hz"), Action::Ok);
@@ -570,10 +559,10 @@ fn with(dev: impl Fn(f32) -> f32) -> [f32; 25] { let t = ltass_db(Voice::Male); 
 }
 #[test] fn restore_comp_follows_saved_dynamic_range() {
     let mut s = summary(|_| 0.0); // dynamic_range_db 10
-    s.crest_db = 7.0; s.peak_db = -10.0; // 보통 모드라면 반시계 30°
+    s.crest_db = 7.0; s.peak_db = -10.0; // 복구는 크레스트를 보지 않습니다
     let comp = |saved| act(&run_t(&group(V3, 0), &s, with(|_| 0.0), Some(saved)), "COMP");
     assert_eq!(comp(4.0), Action::Rotate { degrees: 30.0, db: 0.0 });
-    assert_eq!(comp(16.0), Action::Rotate { degrees: -30.0, db: 0.0 });
+    assert_eq!(comp(16.0), Action::Ok);
     assert_eq!(comp(12.0), Action::Ok);
 }
 #[test] fn rounding_and_labels() {
