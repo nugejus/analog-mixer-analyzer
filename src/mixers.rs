@@ -103,8 +103,9 @@ fn strip(
 pub struct MixerFactory;
 
 impl MixerFactory {
-    // 신뢰도 중간(문서끼리 값이 다름): Behringer 저역컷 75/80 Hz, Soundcraft Signature 게인 범위,
-    // EPM LOW 60/80 Hz, ZEDi 게인, MGP12X HPF 유무. 아래 값은 spec 표 그대로.
+    // 신뢰도 중간(문서끼리 값이 다르거나 문서로 확인 못 함): Behringer 저역컷 75/80 Hz,
+    // Soundcraft Signature 게인 범위, EPM LOW 60/80 Hz, ZEDi 게인, QX1222 저역컷,
+    // Signature 스테레오 HPF, X2442 스테레오 마이크 게인. 아래 값은 spec 표 그대로.
     pub fn create(model: MixerModel) -> MixerProfile {
         use MixerModel::*;
         let (brand, name, pc_tip, groups) = match model {
@@ -121,7 +122,7 @@ impl MixerFactory {
         MackieProFx22v3 => ("Mackie", "ProFX22v3 (2019, LEVEL SET LED)", MACKIE_USB, vec![
             strip("CH1-12 (COMP)", 60.0, Some(100.0), 12000.0, &[(100.0, 8000.0)], 80.0, true),
             strip("CH13-14", 60.0, Some(100.0), 12000.0, &[(100.0, 8000.0)], 80.0, false),
-            strip("CH15-18 (스테레오 마이크)", 60.0, Some(100.0), 12000.0, &[(100.0, 8000.0)], 80.0, false),
+            strip("CH15-20 (스테레오 마이크)", 60.0, Some(100.0), 12000.0, &[(100.0, 8000.0)], 80.0, false),
         ]),
         MackieProFx10v3 => ("Mackie", "ProFX10v3", MACKIE_USB, vec![
             strip("CH1-2 (COMP)", 60.0, Some(100.0), 12000.0, &[(2500.0, 2500.0)], 80.0, true),
@@ -129,13 +130,16 @@ impl MixerFactory {
         ]),
         MackieProFx12v3 => ("Mackie", "ProFX12v3", MACKIE_USB, vec![
             strip("CH1-4 (COMP)", 60.0, Some(100.0), 12000.0, &[(2500.0, 2500.0)], 80.0, true),
+            strip("CH5-10 (스테레오 마이크)", 60.0, Some(100.0), 12000.0, &[(2500.0, 2500.0)], 80.0, false),
         ]),
         MackieProFx16v3 => ("Mackie", "ProFX16v3", MACKIE_USB, vec![
             strip("CH1-8 (COMP)", 60.0, Some(100.0), 12000.0, &[(100.0, 8000.0)], 80.0, true),
+            strip("CH9-14 (스테레오 마이크)", 60.0, Some(100.0), 12000.0, &[(100.0, 8000.0)], 80.0, false),
         ]),
         MackieProFx30v3 => ("Mackie", "ProFX30v3", MACKIE_USB, vec![
             strip("CH1-16 (COMP)", 60.0, Some(100.0), 12000.0, &[(100.0, 8000.0)], 80.0, true),
             strip("CH17-22", 60.0, Some(100.0), 12000.0, &[(100.0, 8000.0)], 80.0, false),
+            strip("CH23-28 (스테레오 마이크)", 60.0, Some(100.0), 12000.0, &[(100.0, 8000.0)], 80.0, false),
         ]),
         Mackie1202Vlz4 => ("Mackie", "1202VLZ4 / 1402VLZ4", NO_USB_SOLO, vec![
             strip("모노 CH", 60.0, Some(75.0), 12000.0, &[(2500.0, 2500.0)], 80.0, false),
@@ -153,19 +157,24 @@ impl MixerFactory {
         ]),
         YamahaMgp16x => ("Yamaha", "MGP16X", YAMAHA_MGP, vec![
             strip("CH1-8 (COMP)", 44.0, Some(100.0), 8000.0, &[(250.0, 5000.0)], 125.0, true),
+            strip("CH9-12 (모노/스테레오)", 44.0, Some(100.0), 8000.0, &[(2500.0, 2500.0)], 125.0, false),
         ]),
         YamahaMgp12x => ("Yamaha", "MGP12X", YAMAHA_MGP, vec![
             strip("CH1-4 (COMP)", 44.0, Some(100.0), 8000.0, &[(250.0, 5000.0)], 125.0, true),
+            strip("CH5-8 (모노/스테레오)", 44.0, Some(100.0), 8000.0, &[(2500.0, 2500.0)], 125.0, false),
         ]),
         YamahaMg20xu => ("Yamaha", "MG20XU", YAMAHA_XU, vec![
             strip("CH1-8 (COMP)", 44.0, Some(80.0), 10000.0, &[(250.0, 5000.0)], 100.0, true),
             strip("CH9-12", 44.0, Some(80.0), 10000.0, &[(250.0, 5000.0)], 100.0, false),
+            strip("CH13-20 (모노/스테레오)", 44.0, Some(80.0), 10000.0, &[(2500.0, 2500.0)], 100.0, false),
         ]),
         YamahaMg16xu => ("Yamaha", "MG16XU", YAMAHA_XU, vec![
             strip("CH1-8 (COMP)", 44.0, Some(80.0), 10000.0, &[(250.0, 5000.0)], 100.0, true),
+            strip("CH9-12 (모노/스테레오)", 44.0, Some(80.0), 10000.0, &[(2500.0, 2500.0)], 100.0, false),
         ]),
         YamahaMg12xu => ("Yamaha", "MG12XU", YAMAHA_XU, vec![
             strip("CH1-4 (COMP)", 44.0, Some(80.0), 10000.0, &[(2500.0, 2500.0)], 100.0, true),
+            strip("CH5-8 (모노/스테레오)", 44.0, Some(80.0), 10000.0, &[(2500.0, 2500.0)], 100.0, false),
         ]),
         YamahaMg10xu => ("Yamaha", "MG10XU", YAMAHA_XU, vec![
             strip("CH1-2 (COMP)", 44.0, Some(80.0), 10000.0, &[(2500.0, 2500.0)], 100.0, true),
@@ -176,9 +185,11 @@ impl MixerFactory {
         ]),
         BehringerX1222Usb => ("Behringer", "X1222USB", BEHRINGER_USB, vec![
             strip("CH1-4 (COMP)", 50.0, Some(80.0), 12000.0, &[(2500.0, 2500.0)], 80.0, true),
+            strip("CH5-8 (스테레오 마이크)", 40.0, None, 12000.0, &[(2500.0, 2500.0)], 80.0, false),
         ]),
         BehringerQx1222Usb => ("Behringer", "QX1222USB", BEHRINGER_USB, vec![
             strip("CH1-4 (COMP)", 50.0, Some(75.0), 12000.0, &[(2500.0, 2500.0)], 80.0, true),
+            strip("CH5-8 (스테레오 마이크)", 40.0, None, 12000.0, &[(2500.0, 2500.0)], 80.0, false),
         ]),
         BehringerX1832Usb => ("Behringer", "X1832USB", BEHRINGER_USB, vec![
             strip("CH1-6 (COMP)", 50.0, Some(75.0), 12000.0, &[(100.0, 8000.0)], 80.0, true),
@@ -191,12 +202,15 @@ impl MixerFactory {
         ]),
         BehringerX2442Usb => ("Behringer", "X2442USB", BEHRINGER_USB, vec![
             strip("CH1-8 (COMP)", 50.0, Some(75.0), 12000.0, &[(100.0, 8000.0)], 80.0, true),
+            strip("CH9-12 (스테레오 마이크)", 40.0, Some(75.0), 12000.0, &[(3000.0, 3000.0), (500.0, 500.0)], 80.0, false),
         ]),
         SoundcraftSignature12 => ("Soundcraft", "Signature 12", SOUNDCRAFT_USB, vec![
             strip("CH1-6", 50.0, Some(100.0), 12000.0, &[(140.0, 3000.0)], 60.0, false),
+            strip("CH7-10 (스테레오 마이크)", 50.0, None, 12000.0, &[(1000.0, 1000.0)], 60.0, false),
         ]),
         SoundcraftSignature22 => ("Soundcraft", "Signature 22", SOUNDCRAFT_USB, vec![
             strip("모노 CH", 50.0, Some(100.0), 12000.0, &[(400.0, 8000.0), (80.0, 2000.0)], 60.0, false),
+            strip("CH15-18 (스테레오 마이크)", 50.0, None, 12000.0, &[(140.0, 3000.0)], 60.0, false),
         ]),
         SoundcraftEpm => ("Soundcraft", "EPM 6/8/12", NO_USB_SOLO, vec![
             strip("모노 CH", 55.0, None, 12000.0, &[(150.0, 3500.0)], 80.0, false),
@@ -265,5 +279,15 @@ fn has(g: &ChannelGroup, c: Control) -> bool { g.controls.contains(&c) }
     assert!(no_mid(MixerModel::YamahaMg06x) && no_mid(MixerModel::AhZed6));
     assert!(has(&MixerFactory::create(MixerModel::MackieProFx22).groups[2], Mid { lo_hz: 2_500.0, hi_hz: 2_500.0 }));
     assert!(has(&MixerFactory::create(MixerModel::AhZedi10).groups[0], Mid { lo_hz: 600.0, hi_hz: 600.0 }));
+}
+#[test] fn stereo_mic_groups() {
+    let mg = MixerFactory::create(MixerModel::YamahaMg16xu);
+    assert_eq!(mg.groups[1].label, "CH9-12 (모노/스테레오)");
+    assert!(has(&mg.groups[1], Mid { lo_hz: 2_500.0, hi_hz: 2_500.0 }) && has(&mg.groups[1], LowCut { hz: 80.0 }));
+    assert!(!has(&mg.groups[1], Comp));
+    let x = MixerFactory::create(MixerModel::BehringerX2442Usb);
+    assert_eq!(x.groups[1].label, "CH9-12 (스테레오 마이크)");
+    let mids: Vec<_> = x.groups[1].controls.iter().filter(|c| matches!(c, Mid { .. })).collect();
+    assert_eq!(mids, [&Mid { lo_hz: 3_000.0, hi_hz: 3_000.0 }, &Mid { lo_hz: 500.0, hi_hz: 500.0 }]);
 }
 }

@@ -142,7 +142,7 @@ EQ ±15 dB(300°)는 모든 믹서에 공통입니다. "게인"은 게인 노브
 | Mackie | ProFX22v2 (2015, 패널에 VITA/READYFX) | v1과 동일 | | | | | | | MACKIE_USB |
 | Mackie | ProFX22v3 (2019) | CH1-12 (COMP) | 60 | 100 | 12k | 100–8k | 80 | ✓ | MACKIE_USB |
 | | | CH13-14 | 60 | 100 | 12k | 100–8k | 80 | – | |
-| | | CH15-18 (스테레오 마이크) | 60 | 100 | 12k | 100–8k | 80 | – | |
+| | | CH15-20 (스테레오 마이크) | 60 | 100 | 12k | 100–8k | 80 | – | |
 | Mackie | ProFX10v3 | CH1-2 (COMP) / CH3-4 | 60 | 100 | 12k | 2.5k | 80 | ✓ / – | MACKIE_USB |
 | Mackie | ProFX12v3 | CH1-4 (COMP) | 60 | 100 | 12k | 2.5k | 80 | ✓ | MACKIE_USB |
 | Mackie | ProFX16v3 | CH1-8 (COMP) | 60 | 100 | 12k | 100–8k | 80 | ✓ | MACKIE_USB |
