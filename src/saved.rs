@@ -11,6 +11,8 @@ pub struct Saved {
     pub group: String,
     pub dynamic_range_db: f32,
     pub bands_db: [f32; 25],
+    /// Analysis sample rate (Hz); `None` for sounds saved by 0.3.1 and older.
+    pub sample_rate: Option<u32>,
 }
 
 /// Tabs and line breaks become spaces so a field stays on its line; ends trimmed.
@@ -18,16 +20,21 @@ pub fn clean(s: &str) -> String {
     s.replace(['\t', '\r', '\n'], " ").trim().to_owned()
 }
 
-/// 29 tab-separated fields: name, mixer, group, dynamic range, 25 bands.
+/// Tab-separated: name, mixer, group, dynamic range, 25 bands, then the sample rate when known (29 or 30 fields).
 pub fn to_line(s: &Saved) -> String {
     let mut f = vec![clean(&s.name), clean(&s.mixer), clean(&s.group)];
     f.extend([s.dynamic_range_db].iter().chain(&s.bands_db).map(|v| format!("{v:.2}")));
+    f.extend(s.sample_rate.map(|r| r.to_string()));
     f.join("\t")
 }
 
 fn parse_line(line: &str) -> Option<Saved> {
     let f: Vec<&str> = line.split('\t').collect();
     let [name, mixer, group, nums @ ..] = f.as_slice() else { return None };
+    let (nums, sample_rate) = match nums {
+        [n @ .., r] if n.len() == 26 => (n, Some(r.trim().parse().ok()?)),
+        n => (n, None),
+    };
     let n: Vec<f32> = nums.iter().map(|v| v.trim().parse().ok().filter(|v: &f32| v.is_finite())).collect::<Option<_>>()?;
     if name.trim().is_empty() || n.len() != 26 {
         return None;
@@ -38,6 +45,7 @@ fn parse_line(line: &str) -> Option<Saved> {
         group: group.to_string(),
         dynamic_range_db: n[0],
         bands_db: n[1..].try_into().ok()?,
+        sample_rate,
     })
 }
 
@@ -128,12 +136,22 @@ mod tests {
 
     fn sample(name: &str) -> Saved {
         Saved { name: name.into(), mixer: "Mackie ProFX22v3 (2019, LEVEL SET LED)".into(), group: "CH1-12 (COMP)".into(),
-                dynamic_range_db: 12.25, bands_db: std::array::from_fn(|i| -1.5 * i as f32) }
+                dynamic_range_db: 12.25, bands_db: std::array::from_fn(|i| -1.5 * i as f32), sample_rate: Some(48_000) }
     }
-    #[test] fn line_roundtrip() { let s = sample("홍길동 목사님 설교"); assert_eq!(parse(&to_line(&s)), [s]); }
+    #[test] fn line_roundtrip() {
+        let s = sample("홍길동 목사님 설교");
+        let line = to_line(&s);
+        assert_eq!((line.split('\t').count(), line.rsplit('\t').next()), (30, Some("48000")));
+        assert_eq!(parse(&line), [s]);
+    }
+    #[test] fn old_line_has_no_sample_rate() {
+        let s = Saved { sample_rate: None, ..sample("가") };
+        assert_eq!(to_line(&s).split('\t').count(), 29);
+        assert_eq!(parse(&to_line(&s)), [s]);
+    }
     #[test] fn bad_lines_are_skipped() {
         let good = to_line(&sample("가"));
-        let short = good.rsplit_once('\t').unwrap().0.to_string();
+        let short = good.rsplitn(3, '\t').last().unwrap().to_string(); // 28 fields
         let text = format!("{good}\r\n\r\ngarbage\n{short}\n{}\n\t{}\n", good.replace("-1.50", "abc"), good.split_once('\t').unwrap().1);
         assert_eq!(parse(&text), [sample("가")]);
     }

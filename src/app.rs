@@ -99,16 +99,30 @@ fn preset_goal(i: usize, voice: Voice, group: &ChannelGroup) -> Goal {
     Goal { db, notes, restore_dr: None }
 }
 
+/// kHz to one decimal without a trailing .0: 48000 → "48", 44100 → "44.1".
+fn khz(hz: f32) -> String {
+    ((hz / 100.0).round() / 10.0).to_string()
+}
+
 /// Restore mode: aim at the saved bands and compare DR with the saved one.
-fn saved_goal(s: &Saved, mixer: &str, group: &str) -> Goal {
-    let notes = if s.mixer == mixer && s.group == group {
-        vec![]
-    } else {
-        vec![format!(
+/// `sample_rate` is the current analysis rate (`None` before the first analysis).
+fn saved_goal(s: &Saved, mixer: &str, group: &str, sample_rate: Option<f32>) -> Goal {
+    let mut notes = vec![];
+    if s.mixer != mixer || s.group != group {
+        notes.push(format!(
             "저장할 때와 믹서/채널이 다릅니다(저장: {} {}). 같은 채널에서 분석해야 맞습니다.",
             s.mixer, s.group
-        )]
-    };
+        ));
+    }
+    match (s.sample_rate, sample_rate) {
+        (None, _) => notes.push("이 소리는 이전 버전에서 저장해 저음 쪽 값이 조금 다릅니다. 같은 마이크·채널로 다시 저장해 주세요.".into()),
+        (Some(was), Some(now)) if was != now.round() as u32 => notes.push(format!(
+            "저장할 때와 샘플레이트가 다릅니다(저장 {}kHz, 지금 {}kHz). 같은 입력장치 설정에서 분석해야 정확합니다.",
+            khz(was as f32),
+            khz(now)
+        )),
+        _ => {}
+    }
     Goal { db: s.bands_db, notes, restore_dr: Some(s.dynamic_range_db) }
 }
 
@@ -350,7 +364,9 @@ impl App {
         let group = &self.profile.groups[self.group];
         self.goal = match self.pick {
             Pick::Preset(i) => preset_goal(i, self.voice, group),
-            Pick::Saved(i) => saved_goal(&self.saved[i], &mixer_name(&self.profile), group.label),
+            Pick::Saved(i) => {
+                saved_goal(&self.saved[i], &mixer_name(&self.profile), group.label, self.analysis.as_ref().map(|a| a.sample_rate))
+            }
         };
         self.advice = self.analysis.as_ref().map(|a| advise(a, group, &self.goal));
     }
@@ -469,6 +485,7 @@ impl App {
                 group: self.profile.groups[self.group].label.to_owned(),
                 dynamic_range_db: s.dynamic_range_db,
                 bands_db: s.bands_db,
+                sample_rate: self.analysis.as_ref().map(|a| a.sample_rate.round() as u32),
             };
             saved::upsert(&mut self.saved, s);
             self.persist();
@@ -1449,23 +1466,32 @@ mod tests {
     }
 
     #[test] fn saved_goal_flags_other_channel() {
-        let s = Saved { name: "x".into(), mixer: "Mackie ProFX22v3 (2019, LEVEL SET LED)".into(), group: "CH1-12 (COMP)".into(), dynamic_range_db: 9.0, bands_db: [0.0; 25] };
-        let same = saved_goal(&s, &s.mixer, &s.group);
+        let s = Saved { name: "x".into(), mixer: "Mackie ProFX22v3 (2019, LEVEL SET LED)".into(), group: "CH1-12 (COMP)".into(), dynamic_range_db: 9.0, bands_db: [0.0; 25], sample_rate: Some(48_000) };
+        let same = saved_goal(&s, &s.mixer, &s.group, Some(48_000.0));
         assert!(same.notes.is_empty() && same.restore_dr == Some(9.0) && same.db == s.bands_db);
-        let other = saved_goal(&s, &s.mixer, "CH13-14");
+        let other = saved_goal(&s, &s.mixer, "CH13-14", Some(48_000.0));
         assert_eq!(other.notes, ["저장할 때와 믹서/채널이 다릅니다(저장: Mackie ProFX22v3 (2019, LEVEL SET LED) CH1-12 (COMP)). 같은 채널에서 분석해야 맞습니다."]);
+    }
+    #[test] fn saved_goal_flags_sample_rate() {
+        let s = saved_sample("x");
+        assert_eq!(saved_goal(&s, "m", "g", Some(44_100.0)).notes,
+                   ["저장할 때와 샘플레이트가 다릅니다(저장 48kHz, 지금 44.1kHz). 같은 입력장치 설정에서 분석해야 정확합니다."]);
+        let old = Saved { sample_rate: None, ..s };
+        assert_eq!(saved_goal(&old, "m", "g", Some(48_000.0)).notes,
+                   ["이 소리는 이전 버전에서 저장해 저음 쪽 값이 조금 다릅니다. 같은 마이크·채널로 다시 저장해 주세요."]);
+        assert_eq!([khz(96_000.0), khz(22_050.0)], ["96", "22.1"]);
     }
     #[test] fn restore_from_saved_says_switch_off() {
         let g = &MixerFactory::create(MixerModel::MackieProFx22v3).groups[0];
         let saved_now = natural(|_| 0.0); // 저장 때: 스위치 꺼짐
         let s = Saved { name: "x".into(), mixer: "m".into(), group: g.label.into(),
-                        dynamic_range_db: 10.0, bands_db: saved_now.summary.as_ref().unwrap().bands_db };
-        let a = advise(&natural(|f| hpf_db(100.0, f)), g, &saved_goal(&s, "m", g.label)); // 지금: 켜짐
+                        dynamic_range_db: 10.0, bands_db: saved_now.summary.as_ref().unwrap().bands_db, sample_rate: Some(48_000) };
+        let a = advise(&natural(|f| hpf_db(100.0, f)), g, &saved_goal(&s, "m", g.label, Some(48_000.0))); // 지금: 켜짐
         assert_eq!(knob(&a, "저역컷 100Hz"), Action::SwitchOff);
     }
 
     fn saved_sample(name: &str) -> Saved {
-        Saved { name: name.into(), mixer: "m".into(), group: "g".into(), dynamic_range_db: 9.0, bands_db: [0.0; 25] }
+        Saved { name: name.into(), mixer: "m".into(), group: "g".into(), dynamic_range_db: 9.0, bands_db: [0.0; 25], sample_rate: Some(48_000) }
     }
     #[test] fn repick_follows_name() {
         let (a, b, c) = (saved_sample("a"), saved_sample("b"), saved_sample("c"));
