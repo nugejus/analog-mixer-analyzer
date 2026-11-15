@@ -128,6 +128,49 @@ fn saved_goal(s: &Saved, mixer: &str, group: &str, sample_rate: Option<f32>) -> 
     Goal { db: s.bands_db, notes, restore_dr: Some(s.dynamic_range_db) }
 }
 
+const FLAT_NOTE: &str = "추천 각도는 가운데에서 돌릴 양입니다. 다시 분석할 때도 먼저 가운데로 돌려 주세요. 그다음 미세 조정은 귀로 하세요. 예배 중에는 소리가 바뀌니 사운드 체크 때 하세요.";
+
+/// 분석 전 안내창의 줄: 그룹에 있는 노브만(팩토리 순서라 MID가 여럿이어도 dedup으로 한 번).
+fn flat_lines(group: &ChannelGroup) -> Vec<String> {
+    let (mut eq, mut off) = (vec![], vec![]);
+    for c in &group.controls {
+        match c {
+            Control::HighShelf { .. } => eq.push("HIGH"),
+            Control::Mid { .. } => eq.push("MID"),
+            Control::LowShelf { .. } => eq.push("LOW"),
+            Control::LowCut { .. } => off.push("저역컷 끄기"),
+            Control::Comp => off.push("COMP는 왼쪽 끝(꺼짐)"),
+            Control::Gain { .. } => {}
+        }
+    }
+    eq.dedup();
+    let mut v = vec![format!("{} 노브는 가운데(12시)로", eq.join("·"))];
+    v.extend((!off.is_empty()).then(|| off.join(", ")));
+    v.push("GAIN과 페이더는 그대로".into());
+    v
+}
+
+/// 분석 전 안내창: Some(true) = 맞췄어요(Enter), Some(false) = 취소(Esc, 바깥 클릭), None = 열려 있음.
+fn flat_dialog(ctx: &egui::Context, group: &ChannelGroup) -> Option<bool> {
+    let m = egui::Modal::new(egui::Id::unique("flat_start")).show(ctx, |ui| {
+        ui.set_max_width(360.0);
+        ui.heading("분석 전에 맞춰 주세요");
+        for l in flat_lines(group) {
+            ui.label(l);
+        }
+        ui.add(egui::Label::new(egui::RichText::new(FLAT_NOTE).color(mocha::SUBTEXT0)).wrap());
+        ui.horizontal(|ui| (ui.button(egui::RichText::new("맞췄어요, 분석").strong()).clicked(), ui.button("취소").clicked()))
+            .inner
+    });
+    let (ok, cancel) = m.inner;
+    let enter = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+    if cancel || m.should_close() {
+        Some(false)
+    } else {
+        (ok || enter).then_some(true)
+    }
+}
+
 /// The `목표` choice: a preset or a saved sound.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Pick {
@@ -304,6 +347,8 @@ pub struct App {
     confirm_delete: bool,
     save_error: Option<String>,
     rec_seconds: u32,
+    /// `분석` was pressed: the flat-start dialog is open.
+    flat_start: bool,
     /// Index into `SMOOTHING`.
     smooth: usize,
     /// Index into `RESOLUTIONS`.
@@ -375,6 +420,7 @@ impl App {
             voice: Voice::Male,
             pick: Pick::Preset(0),
             rec_seconds: 20,
+            flat_start: false,
             smooth: 1,
             res: 2,
             freq_smooth: 3,
@@ -631,6 +677,18 @@ impl App {
         }
         ui.horizontal_wrapped(|ui| self.save_controls(ui));
         ui.separator();
+        // 버튼보다 먼저: [분석]을 누른 Enter가 같은 프레임에 안내창까지 확인하지 않게 합니다.
+        if self.flat_start {
+            let r = flat_dialog(ui.ctx(), &self.profile.groups[self.group]);
+            self.flat_start = r.is_none();
+            // 그사이 입력장치가 안 열리면(Err) 녹음하지 않고 닫기만 합니다.
+            if r == Some(true)
+                && let Ok(live) = &mut self.live
+            {
+                live.curve.reset_peak();
+                live.rec = Some(Recording::new(self.rec_seconds, HOP as f32 / live.input.sample_rate));
+            }
+        }
         let recording = self.live.as_ref().is_ok_and(|l| l.rec.is_some());
         ui.horizontal(|ui| {
             ui.label("녹음");
@@ -649,15 +707,11 @@ impl App {
             .clicked()
             && let Ok(live) = &mut self.live
         {
-            live.rec = if recording {
-                None
+            if recording {
+                live.rec = None;
             } else {
-                live.curve.reset_peak();
-                Some(Recording::new(
-                    self.rec_seconds,
-                    HOP as f32 / live.input.sample_rate,
-                ))
-            };
+                self.flat_start = true;
+            }
         }
         ui.separator();
         ui.label("실시간 선");
@@ -1262,6 +1316,19 @@ mod tests {
         let get = |l: &str| s.iter().find(|x| x.0 == l).unwrap().clone();
         assert_eq!(get("MID 1"), ("MID 1".into(), 400.0, 8_000.0, None));
         assert_eq!(get("MID 2"), ("MID 2".into(), 80.0, 2_000.0, Some(200.0)));
+    }
+
+    #[test]
+    fn flat_lines_follow_group() {
+        let lines = |m, i: usize| flat_lines(&MixerFactory::create(m).groups[i]);
+        assert_eq!(lines(MixerModel::MackieProFx22v3, 0),
+                   ["HIGH·MID·LOW 노브는 가운데(12시)로", "저역컷 끄기, COMP는 왼쪽 끝(꺼짐)", "GAIN과 페이더는 그대로"]);
+        for m in [MixerModel::YamahaMg06x, MixerModel::AhZed6] {
+            assert_eq!(lines(m, 0), ["HIGH·LOW 노브는 가운데(12시)로", "저역컷 끄기", "GAIN과 페이더는 그대로"]);
+        }
+        assert_eq!(lines(MixerModel::SoundcraftEpm, 0), ["HIGH·MID·LOW 노브는 가운데(12시)로", "GAIN과 페이더는 그대로"]);
+        assert_eq!(lines(MixerModel::SoundcraftSignature22, 0),
+                   ["HIGH·MID·LOW 노브는 가운데(12시)로", "저역컷 끄기", "GAIN과 페이더는 그대로"]);
     }
 
     #[test]
