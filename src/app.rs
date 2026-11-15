@@ -834,21 +834,23 @@ fn spectrum_plot(
         }
     })
     .show(ui, |p| {
-        if let (true, Some(tone)) = (show.tone, tone_db) {
-            for (&(name, lo, hi), &d) in mixer_analyzer::target::TONE_BANDS.iter().zip(&tone) {
+        // Rounded first so the colour agrees with the printed value (+3.0 is red, never "-0.0").
+        let tone: Vec<_> = tone_db
+            .filter(|_| show.tone)
+            .map(|t| {
+                let bands = mixer_analyzer::target::TONE_BANDS.iter();
+                bands.zip(t).map(|(&(name, lo, hi), d)| (name, lo, hi, (d * 10.0).round() / 10.0 + 0.0)).collect()
+            })
+            .unwrap_or_default();
+        let band_color = |d: f32| (d.abs() >= 3.0).then_some(if d > 0.0 { mocha::RED } else { mocha::BLUE });
+        // Bands behind the curves, their labels (below) in front.
+        for &(_, lo, hi, d) in &tone {
+            if let Some(color) = band_color(d) {
                 let (x0, x1) = (f64::from(lo.log10()), f64::from(hi.log10()));
-                let hot = d.abs() >= 3.0;
-                let color = if d >= 3.0 { mocha::RED } else { mocha::BLUE };
-                if hot {
-                    let alpha = if d >= 3.0 { 50 } else { 30 };
-                    let fill = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha);
-                    let pts: PlotPoints = [[x0, -90.0], [x1, -90.0], [x1, 0.0], [x0, 0.0]].into_iter().collect();
-                    p.polygon(Polygon::new("", pts).fill_color(fill).stroke(egui::Stroke::NONE));
-                }
-                let pos = PlotPoint::new((x0 + x1) / 2.0, -88.0);
-                let text = format!("{name}\n{d:+.1} dB");
-                let col = if hot { color } else { mocha::SUBTEXT0 };
-                p.text(Text::new("", pos, text).color(col).anchor(Align2::CENTER_BOTTOM));
+                let alpha = if d > 0.0 { 50 } else { 30 };
+                let fill = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha);
+                let pts: PlotPoints = [[x0, -90.0], [x1, -90.0], [x1, 0.0], [x0, 0.0]].into_iter().collect();
+                p.polygon(Polygon::new("", pts).fill_color(fill).stroke(egui::Stroke::NONE));
             }
         }
         if show.peak {
@@ -857,7 +859,19 @@ fn spectrum_plot(
         if let (true, Some(db)) = (show.result, result_db) {
             p.line(line("분석 결과", &freqs, db, mocha::GREEN).width(2.5));
         }
-        if let (true, Some(db)) = (show.bumps, result_db) {
+        if show.live {
+            p.line(line("현재 소리", &freqs, &curve.smooth_db, mocha::BLUE));
+        }
+        if let (true, Some(t)) = (show.target, target_db) {
+            p.line(line("목표", &BANDS_HZ, &t, mocha::SUBTEXT0).style(LineStyle::dotted_dense()));
+        }
+        for &(name, lo, hi, d) in &tone {
+            let pos = PlotPoint::new(f64::from((lo.log10() + hi.log10()) / 2.0), -88.0);
+            let col = band_color(d).unwrap_or(mocha::SUBTEXT0);
+            p.text(Text::new("", pos, format!("{name}\n{d:+.1} dB")).color(col).anchor(Align2::CENTER_BOTTOM));
+        }
+        // Markers sit on the analysis curve, so they need it shown; drawn last so no line covers them.
+        if let (true, true, Some(db)) = (show.bumps, show.result, result_db) {
             for &(hz, over) in bumps {
                 let i = freqs.partition_point(|&f| f < hz).min(freqs.len() - 1);
                 let pos = PlotPoint::new(f64::from(freqs[i].log10()), f64::from(db[i]));
@@ -866,12 +880,6 @@ fn spectrum_plot(
                 let label = format!("{name} {over:+.0}dB");
                 p.text(Text::new("", PlotPoint::new(pos.x, pos.y + 2.0), label).color(mocha::PEACH).anchor(Align2::CENTER_BOTTOM));
             }
-        }
-        if show.live {
-            p.line(line("현재 소리", &freqs, &curve.smooth_db, mocha::BLUE));
-        }
-        if let (true, Some(t)) = (show.target, target_db) {
-            p.line(line("목표", &BANDS_HZ, &t, mocha::SUBTEXT0).style(LineStyle::dotted_dense()));
         }
         if show.knobs {
             // Rows start at −5 dB so the first label is not clipped by the top edge.
