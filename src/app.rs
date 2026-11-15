@@ -1,7 +1,7 @@
 use eframe::egui::{
     self, Align, Align2, Color32, Layout, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Vec2, vec2,
 };
-use egui_plot::{GridMark, Line, LineStyle, Plot, PlotPoint, PlotPoints, Points, Polygon, Text, VLine};
+use egui_plot::{GridMark, Line, LineStyle, Plot, PlotPoint, PlotPoints, MarkerShape, Points, Polygon, Text, VLine};
 use mixer_analyzer::{
     advice::{self, Action, Advice, AdviceEngine, AdviceSet, Inputs, fmt_hz},
     audio::{self, Input},
@@ -743,11 +743,12 @@ struct Show {
     target: bool,
     knobs: bool,
     tone: bool,
+    bumps: bool,
 }
 
 impl Default for Show {
     fn default() -> Self {
-        Self { result: true, live: true, peak: true, target: true, knobs: true, tone: true }
+        Self { result: true, live: true, peak: true, target: true, knobs: true, tone: true, bumps: false }
     }
 }
 
@@ -794,6 +795,7 @@ fn spectrum_plot(
     result_db: Option<&[f32]>,
     target_db: Option<[f32; 25]>,
     tone_db: Option<[f32; 8]>,
+    bumps: &[(f32, f32)],
     per_oct: usize,
     show: &Show,
     spans: &[Span],
@@ -854,6 +856,16 @@ fn spectrum_plot(
         }
         if let (true, Some(db)) = (show.result, result_db) {
             p.line(line("분석 결과", &freqs, db, mocha::GREEN).width(2.5));
+        }
+        if let (true, Some(db)) = (show.bumps, result_db) {
+            for &(hz, over) in bumps {
+                let i = freqs.partition_point(|&f| f < hz).min(freqs.len() - 1);
+                let pos = PlotPoint::new(f64::from(freqs[i].log10()), f64::from(db[i]));
+                p.points(Points::new("", vec![[pos.x, pos.y]]).shape(MarkerShape::Down).color(mocha::PEACH).radius(5.0));
+                let name = if hz >= 1000.0 { format!("{:.1}kHz", hz / 1000.0) } else { format!("{hz:.0}Hz") };
+                let label = format!("{name} {over:+.0}dB");
+                p.text(Text::new("", PlotPoint::new(pos.x, pos.y + 2.0), label).color(mocha::PEACH).anchor(Align2::CENTER_BOTTOM));
+            }
         }
         if show.live {
             p.line(line("현재 소리", &freqs, &curve.smooth_db, mocha::BLUE));
@@ -1130,15 +1142,20 @@ impl eframe::App for App {
                     ui.checkbox(&mut sh.target, c("목표", mocha::SUBTEXT0));
                     ui.checkbox(&mut sh.knobs, c("노브 구간", mocha::OVERLAY1));
                     ui.checkbox(&mut sh.tone, c("대역 비교", mocha::RED));
+                    ui.checkbox(&mut sh.bumps, c("봉우리 표시", mocha::PEACH));
                 });
                 let tone = summary.zip(advice).map(|(s, a)| {
                     let mut reference = self.goal.db;
                     reference.iter_mut().for_each(|v| *v += a.level_offset_db);
                     mixer_analyzer::target::tone_excess(&s.bands_db, &reference)
                 });
+                let bumps = match (&self.analysis, summary) {
+                    (Some(a), Some(s)) if self.show.bumps => spectrum::peaks(&s.bin_power, a.sample_rate, per_oct),
+                    _ => Vec::new(),
+                };
                 let spans = knob_spans(&self.profile.groups[self.group], advice);
                 let result = self.analysis.as_ref().and_then(|a| result_db(a, per_oct, FREQ_SMOOTH[self.freq_smooth].1));
-                spectrum_plot(ui, &live.curve, result.as_deref(), target, tone, per_oct, &self.show, &spans, h * 0.6);
+                spectrum_plot(ui, &live.curve, result.as_deref(), target, tone, &bumps, per_oct, &self.show, &spans, h * 0.6);
                 ui.strong("레벨/디스토션 기록 (최근 30초)");
                 level_plot(ui, live.levels.history(), h * 0.4);
                 status_line(

@@ -147,6 +147,31 @@ pub fn display_db(bin_power: &[f32], sample_rate: f32, per_oct: usize, smooth_n:
         .collect()
 }
 
+/// Narrow bumps of the analysis curve: (Hz, dB above the 1-octave average), largest first, at most 5.
+/// A point counts when its 1/6-octave curve is >= 3 dB over the 1-octave curve and the highest
+/// within ±1/6 octave, 100 Hz–10 kHz.
+pub fn peaks(bin_power: &[f32], sample_rate: f32, per_oct: usize) -> Vec<(f32, f32)> {
+    let fine = display_db(bin_power, sample_rate, per_oct, 6);
+    let wide = display_db(bin_power, sample_rate, per_oct, 1);
+    let r = (per_oct / 6).max(1);
+    let mut out: Vec<(f32, f32)> = display_freqs(per_oct)
+        .into_iter()
+        .enumerate()
+        .filter(|&(i, f)| {
+            let lo = i.saturating_sub(r);
+            let hi = (i + r).min(fine.len() - 1);
+            (100.0..=10_000.0).contains(&f)
+                && fine[i] - wide[i] >= 3.0
+                && (lo..i).all(|j| fine[j] < fine[i])
+                && (i + 1..=hi).all(|j| fine[j] <= fine[i])
+        })
+        .map(|(i, f)| (f, fine[i] - wide[i]))
+        .collect();
+    out.sort_by(|a, b| b.1.total_cmp(&a.1));
+    out.truncate(5);
+    out
+}
+
 pub struct DisplayCurve {
     pub smooth_db: Vec<f32>,
     pub peak_db: Vec<f32>,
@@ -376,5 +401,38 @@ mod tests {
         };
         assert!((step(0.3) + 10.16).abs() < 0.1, "{}", step(0.3));
         assert!((step(3.0) + 15.47).abs() < 0.1, "{}", step(3.0));
+    }
+
+    fn shaped(gain_db: impl Fn(f32) -> f32) -> Vec<f32> {
+        let bw = 48_000.0 / FFT_SIZE as f32;
+        (0..=FFT_SIZE / 2).map(|k| 1e-6 * 10f32.powf(gain_db((k as f32 * bw).max(1.0)) / 10.0)).collect()
+    }
+
+    #[test]
+    fn flat_has_no_peaks() {
+        assert!(peaks(&shaped(|_| 0.0), 48_000.0, 48).is_empty());
+    }
+
+    #[test]
+    fn narrow_bump_is_a_peak() {
+        let p = peaks(&shaped(|f| 10.0 * (-(f / 1000.0).log2().powi(2) / (2.0 * 0.04f32.powi(2))).exp()), 48_000.0, 48);
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert!((p[0].0 / 1000.0).log2().abs() < 1.0 / 12.0 && p[0].1 >= 3.0, "{p:?}");
+    }
+
+    #[test]
+    fn broad_rise_is_not_a_peak() {
+        let p = peaks(&shaped(|f| 8.0 * (-(f / 3200.0).log2().powi(2) / (2.0 * 0.5f32.powi(2))).exp()), 48_000.0, 48);
+        assert!(p.is_empty(), "{p:?}");
+    }
+
+    #[test]
+    fn at_most_five_largest_first() {
+        let centres = [150.0f32, 300.0, 600.0, 1200.0, 2400.0, 4800.0, 9000.0];
+        let p = peaks(&shaped(|f| centres.iter().enumerate()
+            .map(|(i, c)| (4.0 + i as f32) * (-(f / c).log2().powi(2) / (2.0 * 0.04f32.powi(2))).exp())
+            .sum()), 48_000.0, 48);
+        assert_eq!(p.len(), 5, "{p:?}");
+        assert!(p.windows(2).all(|w| w[0].1 >= w[1].1), "{p:?}");
     }
 }
