@@ -789,7 +789,7 @@ impl App {
             Pick::Preset(i) => PRESETS[i].when.to_owned(),
             Pick::Saved(i) => {
                 let s = &self.saved[i];
-                format!("저장: {} {} — 저장할 때와 같은 사람·같은 마이크로 분석하세요.", s.mixer, s.group)
+                format!("저장: {} {} — 저장할 때와 같은 사람이 말할 때 분석하세요.", s.mixer, s.group)
             }
         };
         ui.add(egui::Label::new(egui::RichText::new(when).color(mocha::SUBTEXT0)).wrap_mode(egui::TextWrapMode::Wrap));
