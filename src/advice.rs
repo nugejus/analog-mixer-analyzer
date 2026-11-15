@@ -307,8 +307,10 @@ impl AdviceEngine {
         let mut main = vec![Action::Ok; ctl.len()];
         let mut freq_act = vec![Action::Ok; ctl.len()];
         for (&i, &g) in eq.iter().zip(&gains) {
+            // 보통 모드에서 켜기 권장이면 LOW 부스트 없음: 맞춤 범위(100 Hz~) 밖 63·80 Hz는 아직 넘치는데
+            // 스위치가 100–160 Hz에서 깎은 만큼을 LOW가 되채우면 같은 저역을 둘이 반대로 쫓습니다.
             let max = if restore.is_none() && matches!(ctl[i], Control::LowShelf { .. }) {
-                LOW_BOOST_MAX_DB
+                if switch > 0.0 { 0.0 } else { LOW_BOOST_MAX_DB }
             } else {
                 EQ_LIMIT_DB
             };
@@ -438,8 +440,13 @@ const FX12: MixerModel = MixerModel::MackieProFx12v3;
 #[test] fn rumble_recommends_lowcut() {
     let a = run(&mut AdviceEngine::new(), &group(V3, 0), &summary(|f| if f < 90.0 { 12.0 } else { 0.0 }));
     assert_eq!(act(&a, "저역컷 100Hz"), Action::SwitchOn);
-    // 스위치가 100·125·160 Hz에서 깎는 만큼(−3.0/−1.5/−0.6 dB)을 LOW가 채우되 부스트 상한 +3 dB.
-    assert_eq!(act(&a, "LOW 80Hz"), Action::Rotate { degrees: 30.0, db: 3.0 });
+    assert_eq!(act(&a, "LOW 80Hz"), Action::Ok);
+}
+#[test] fn boom_over_switch_threshold_switches_on_without_low() {
+    // 6 dB 붐은 mean(63,80) − c0 = 3.23 > 3이라 스위치를 켭니다. 그 위에서 LOW가 부스트(+2.9)로 되채우면 안 됩니다.
+    let a = run(&mut AdviceEngine::new(), &group(V3, 0), &summary(|f| 6.0 * Shape::LowShelf(80.0).response(f)));
+    assert_eq!(act(&a, "저역컷 100Hz"), Action::SwitchOn);
+    assert_eq!(act(&a, "LOW 80Hz"), Action::Ok);
 }
 #[test] fn clip_turns_gain_down() {
     let mut s = summary(|f| 20.0 * Shape::Bell(3_000.0).response(f));
