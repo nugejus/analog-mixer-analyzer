@@ -66,9 +66,14 @@ pub fn default_path() -> Option<PathBuf> {
     Some(base.join("MixerAnalyzer").join("saved.tsv"))
 }
 
-/// Missing or unreadable file = empty list. Lossy so one badly encoded line does not hide the rest.
-pub fn load(path: &Path) -> Vec<Saved> {
-    std::fs::read(path).map(|b| parse(&String::from_utf8_lossy(&b))).unwrap_or_default()
+/// Missing file = empty list; any other read error is returned so the caller never overwrites a file it could not read.
+/// Lossy so one badly encoded line does not hide the rest.
+pub fn load(path: &Path) -> std::io::Result<Vec<Saved>> {
+    match std::fs::read(path) {
+        Ok(b) => Ok(parse(&String::from_utf8_lossy(&b))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(vec![]),
+        Err(e) => Err(e),
+    }
 }
 
 /// Writes `saved.tsv.tmp` then renames it over the file, so a crash mid-write keeps the old file.
@@ -109,10 +114,18 @@ mod tests {
     #[test] fn store_then_load() {
         let dir = std::env::temp_dir().join(format!("mixer-analyzer-test-{}", std::process::id()));
         let p = dir.join("MixerAnalyzer").join("saved.tsv");
-        assert!(load(&p).is_empty());
+        assert!(load(&p).unwrap().is_empty());
         let l = vec![sample("a"), sample("b")];
         store(&p, &l).unwrap();
-        assert_eq!(load(&p), l);
+        assert_eq!(load(&p).unwrap(), l);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+    #[test] fn unreadable_file_is_an_error() {
+        // A directory where the file should be: exists but cannot be read, on every OS and even as root.
+        let p = std::env::temp_dir().join(format!("mixer-analyzer-unreadable-{}", std::process::id()));
+        std::fs::create_dir_all(&p).unwrap();
+        assert!(load(&p).is_err());
+        assert!(load(&p.join("missing.tsv")).unwrap().is_empty());
+        std::fs::remove_dir_all(&p).unwrap();
     }
 }

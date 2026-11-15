@@ -245,13 +245,21 @@ impl App {
         };
         let model = MixerModel::MackieProFx22v3;
         let profile = MixerFactory::create(model);
-        let saved_path = saved::default_path();
+        let mut saved_path = saved::default_path();
+        // An existing file we cannot read must not be replaced by a shorter list: no path = persist refuses.
+        let (saved, save_error) = match saved_path.as_deref().map(saved::load).transpose() {
+            Ok(l) => (l.unwrap_or_default(), None),
+            Err(e) => {
+                saved_path = None;
+                (vec![], Some(format!("저장하지 못했습니다: {e}")))
+            }
+        };
         Self {
-            saved: saved_path.as_deref().map(saved::load).unwrap_or_default(),
+            saved,
             saved_path,
             naming: None,
             confirm_delete: false,
-            save_error: None,
+            save_error,
             devices: audio::device_names(),
             live: open(&device, RESOLUTIONS[2].1),
             device,
