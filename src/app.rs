@@ -349,7 +349,7 @@ impl App {
         };
     }
 
-    /// `저장 폴더`: the path (cut with "…", full text on hover), 찾아보기…/폴더 열기, 읽기/쓰기.
+    /// `저장 폴더`: the path (side_panel's Truncate cuts it with "…"; egui's Label then shows the full text on hover), 찾아보기…/폴더 열기, 읽기/쓰기.
     fn folder_controls(&mut self, ui: &mut egui::Ui) {
         ui.label("저장 폴더");
         ui.label(self.dir.as_ref().map_or("저장 폴더를 찾을 수 없습니다".into(), |d| d.display().to_string()));
