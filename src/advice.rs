@@ -12,7 +12,7 @@ const OK_BELOW_DB: f32 = 1.5;
 const OK_RELEASE_DB: f32 = 2.5;
 const NO_INPUT: &str = "입력 신호가 없습니다. 케이블과 입력장치를 확인하세요. macOS에서는 시스템 설정 > 개인정보 보호 및 보안 > 마이크에서 이 앱을 허용하세요.";
 const KEEP_TALKING: &str = "말씀을 계속해 주세요";
-const OVERLOAD: &str = "과부하 의심: 아날로그 단에서 눌리거나 COMP가 과한 경우입니다.";
+pub const OVERLOAD: &str = "과부하 의심: 아날로그 단에서 눌리거나 COMP가 과한 경우입니다.";
 
 fn weight(b: usize) -> f32 {
     if b == 23 { 0.5 } else { 1.0 }
