@@ -123,6 +123,14 @@ fn repick(pick: Pick, old: &[Saved], new: &[Saved]) -> Pick {
     }
 }
 
+/// `읽기`: a gone folder (USB pulled) is an error, not an empty list, so its file is not replaced once it is back.
+fn read_list(dir: &Path) -> std::io::Result<Vec<Saved>> {
+    if !dir.is_dir() {
+        return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "저장 폴더를 찾을 수 없습니다"));
+    }
+    saved::load(&dir.join(saved::FILE))
+}
+
 /// Writes `list` to `dir/saved.tsv`, unless there is no folder or its file could not be read.
 fn write_list(dir: Option<&Path>, blocked: bool, list: &[Saved]) -> Result<(), String> {
     let dir = dir.ok_or("저장 폴더를 찾을 수 없습니다")?;
@@ -380,7 +388,7 @@ impl App {
             self.save_error = Some(format!("폴더를 열지 못했습니다: {e}"));
         }
         if let (true, Some(d)) = (read, &self.dir) {
-            let list = saved::load(&d.join(saved::FILE));
+            let list = read_list(d);
             self.take_list(list);
         }
         if write {
@@ -1304,6 +1312,14 @@ mod tests {
         assert_eq!(repick(Pick::Saved(1), &old, &[b.clone(), c.clone()]), Pick::Saved(0));
         assert_eq!(repick(Pick::Saved(0), &old, &[b, c]), Pick::Preset(0));
         assert_eq!(repick(Pick::Preset(3), &old, &[]), Pick::Preset(3));
+    }
+    #[test] fn read_gone_folder_is_an_error() {
+        let d = std::env::temp_dir().join(format!("mixer-analyzer-gone-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        assert_eq!(read_list(&d).unwrap_err().to_string(), "저장 폴더를 찾을 수 없습니다");
+        std::fs::create_dir_all(&d).unwrap();
+        assert_eq!(read_list(&d).unwrap(), []);
+        std::fs::remove_dir_all(&d).unwrap();
     }
     #[test] fn blocked_write_keeps_file() {
         let d = std::env::temp_dir().join(format!("mixer-analyzer-blocked-{}", std::process::id()));
