@@ -49,9 +49,17 @@ fn parse_line(line: &str) -> Option<Saved> {
     })
 }
 
-/// Lines that do not parse (hand edits, truncation) are skipped; CRLF is fine.
-pub fn parse(text: &str) -> Vec<Saved> {
-    text.lines().filter_map(parse_line).collect()
+/// The sounds, and the first line (1-based) that does not parse (hand edits, truncation); those are skipped.
+/// A leading BOM and blank lines are ignored; CRLF is fine.
+pub fn parse(text: &str) -> (Vec<Saved>, Option<usize>) {
+    let (mut list, mut bad) = (vec![], None);
+    for (i, line) in text.trim_start_matches('\u{feff}').lines().enumerate().filter(|(_, l)| !l.trim().is_empty()) {
+        match parse_line(line) {
+            Some(s) => list.push(s),
+            None => _ = bad.get_or_insert(i + 1),
+        }
+    }
+    (list, bad)
 }
 
 /// Same name replaces in place, so indexes into the list stay valid.
@@ -91,14 +99,14 @@ pub fn remember_dir(default: &Path, dir: &Path) -> std::io::Result<()> {
     std::fs::write(default.join(REMEMBER), format!("{}\n", dir.display()))
 }
 
-/// Switch to `dir`: its `saved.tsv` if there is one, else move `current` into it.
-pub fn adopt(dir: &Path, current: &[Saved]) -> std::io::Result<Vec<Saved>> {
+/// Switch to `dir`: its `saved.tsv` if there is one (as `load`), else move `current` into it.
+pub fn adopt(dir: &Path, current: &[Saved]) -> std::io::Result<(Vec<Saved>, Option<usize>)> {
     let p = dir.join(FILE);
     if p.try_exists()? {
         return load(&p);
     }
     store(&p, current)?;
-    Ok(current.to_vec())
+    Ok((current.to_vec(), None))
 }
 
 /// Shows `dir` in the file manager without waiting (explorer exits 1 even on success).
@@ -109,11 +117,11 @@ pub fn open_dir(dir: &Path) -> std::io::Result<()> {
 }
 
 /// Missing file = empty list; any other read error is returned so the caller never overwrites a file it could not read.
-/// Lossy so one badly encoded line does not hide the rest.
-pub fn load(path: &Path) -> std::io::Result<Vec<Saved>> {
+/// Lossy so one badly encoded line does not hide the rest. A bad line number (see `parse`) means the file must not be rewritten.
+pub fn load(path: &Path) -> std::io::Result<(Vec<Saved>, Option<usize>)> {
     match std::fs::read(path) {
         Ok(b) => Ok(parse(&String::from_utf8_lossy(&b))),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(vec![]),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok((vec![], None)),
         Err(e) => Err(e),
     }
 }
@@ -142,18 +150,23 @@ mod tests {
         let s = sample("홍길동 목사님 설교");
         let line = to_line(&s);
         assert_eq!((line.split('\t').count(), line.rsplit('\t').next()), (30, Some("48000")));
-        assert_eq!(parse(&line), [s]);
+        assert_eq!(parse(&line), (vec![s], None));
     }
     #[test] fn old_line_has_no_sample_rate() {
         let s = Saved { sample_rate: None, ..sample("가") };
         assert_eq!(to_line(&s).split('\t').count(), 29);
-        assert_eq!(parse(&to_line(&s)), [s]);
+        assert_eq!(parse(&to_line(&s)), (vec![s], None));
     }
-    #[test] fn bad_lines_are_skipped() {
+    #[test] fn bad_lines_are_skipped_and_the_first_reported() {
         let good = to_line(&sample("가"));
         let short = good.rsplitn(3, '\t').last().unwrap().to_string(); // 28 fields
-        let text = format!("{good}\r\n\r\ngarbage\n{short}\n{}\n\t{}\n", good.replace("-1.50", "abc"), good.split_once('\t').unwrap().1);
-        assert_eq!(parse(&text), [sample("가")]);
+        let text = format!("{good}\r\n\r\n \t \ngarbage\n{short}\n{}\n\t{}\n{}\n", good.replace("-1.50", "abc"),
+                           good.split_once('\t').unwrap().1, to_line(&sample("나")));
+        assert_eq!(parse(&text), (vec![sample("가"), sample("나")], Some(4)));
+        assert_eq!(parse(&format!("\n{good}\n  \n\n")), (vec![sample("가")], None));
+    }
+    #[test] fn bom_is_stripped() {
+        assert_eq!(parse(&format!("\u{feff}{}\n", to_line(&sample("가")))), (vec![sample("가")], None));
     }
     #[test] fn clean_removes_tabs_and_newlines() { assert_eq!(clean("  홍길동\t목사\r\n "), "홍길동 목사"); }
     #[test] fn upsert_replaces_same_name() {
@@ -166,10 +179,10 @@ mod tests {
     #[test] fn store_then_load() {
         let dir = std::env::temp_dir().join(format!("mixer-analyzer-test-{}", std::process::id()));
         let p = dir.join("MixerAnalyzer").join("saved.tsv");
-        assert!(load(&p).unwrap().is_empty());
+        assert_eq!(load(&p).unwrap(), (vec![], None));
         let l = vec![sample("a"), sample("b")];
         store(&p, &l).unwrap();
-        assert_eq!(load(&p).unwrap(), l);
+        assert_eq!(load(&p).unwrap(), (l, None));
         std::fs::remove_dir_all(&dir).unwrap();
     }
     #[test] fn unreadable_file_is_an_error() {
@@ -177,7 +190,7 @@ mod tests {
         let p = std::env::temp_dir().join(format!("mixer-analyzer-unreadable-{}", std::process::id()));
         std::fs::create_dir_all(&p).unwrap();
         assert!(load(&p).is_err());
-        assert!(load(&p.join("missing.tsv")).unwrap().is_empty());
+        assert_eq!(load(&p.join("missing.tsv")).unwrap(), (vec![], None));
         std::fs::remove_dir_all(&p).unwrap();
     }
     fn temp(tag: &str) -> PathBuf {
@@ -199,21 +212,30 @@ mod tests {
     #[test] fn adopt_reads_existing_file() {
         let d = temp("adopt-read");
         store(&d.join(FILE), &[sample("a")]).unwrap();
-        assert_eq!(adopt(&d, &[sample("b")]).unwrap(), [sample("a")]);
-        assert_eq!(load(&d.join(FILE)).unwrap(), [sample("a")]);
+        assert_eq!(adopt(&d, &[sample("b")]).unwrap(), (vec![sample("a")], None));
+        assert_eq!(load(&d.join(FILE)).unwrap(), (vec![sample("a")], None));
         std::fs::remove_dir_all(&d).unwrap();
     }
     #[test] fn adopt_moves_list_into_empty_folder() {
         let d = temp("adopt-move").join("new");
         let l = vec![sample("a"), sample("b")];
-        assert_eq!(adopt(&d, &l).unwrap(), l);
-        assert_eq!(load(&d.join(FILE)).unwrap(), l);
+        assert_eq!(adopt(&d, &l).unwrap(), (l.clone(), None));
+        assert_eq!(load(&d.join(FILE)).unwrap(), (l, None));
         std::fs::remove_dir_all(d.parent().unwrap()).unwrap();
     }
     #[test] fn adopt_reports_unreadable_file() {
         let d = temp("adopt-bad");
         std::fs::create_dir_all(d.join(FILE)).unwrap(); // a folder where the file should be
         assert!(adopt(&d, &[sample("a")]).is_err());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+    #[test] fn adopt_reports_bad_line_and_keeps_file() {
+        let d = temp("adopt-line");
+        std::fs::create_dir_all(&d).unwrap();
+        let text = format!("{}\ngarbage\n", to_line(&sample("a")));
+        std::fs::write(d.join(FILE), &text).unwrap();
+        assert_eq!(adopt(&d, &[sample("b")]).unwrap(), (vec![sample("a")], Some(2)));
+        assert_eq!(std::fs::read_to_string(d.join(FILE)).unwrap(), text);
         std::fs::remove_dir_all(&d).unwrap();
     }
 }

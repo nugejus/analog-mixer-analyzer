@@ -142,11 +142,16 @@ fn repick(pick: Pick, old: &[Saved], new: &[Saved]) -> Pick {
 }
 
 /// `읽기`: a gone folder (USB pulled) is an error, not an empty list, so its file is not replaced once it is back.
-fn read_list(dir: &Path) -> std::io::Result<Vec<Saved>> {
+fn read_list(dir: &Path) -> std::io::Result<(Vec<Saved>, Option<usize>)> {
     if !dir.is_dir() {
         return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "저장 폴더를 찾을 수 없습니다"));
     }
     saved::load(&dir.join(saved::FILE))
+}
+
+/// A `saved.tsv` line that did not parse: the rest is used but the file is not written until 읽기/쓰기.
+fn bad_line(n: usize) -> String {
+    format!("saved.tsv의 {n}번째 줄을 읽지 못했습니다. 파일을 고치거나 [읽기]/[쓰기]로 다른 파일을 고르기 전에는 저장·삭제하지 않습니다.")
 }
 
 /// Writes `list` to `dir/saved.tsv`, unless there is no folder or its file could not be read.
@@ -321,7 +326,13 @@ impl App {
         };
         // An existing file we cannot read must not be replaced by a shorter list: blocked until 읽기/쓰기.
         let (saved, write_blocked) = match dir.as_deref().map(|d| saved::load(&d.join(saved::FILE))).transpose() {
-            Ok(l) => (l.unwrap_or_default(), false),
+            Ok(l) => {
+                let (l, bad) = l.unwrap_or_default();
+                if let Some(n) = bad {
+                    save_error = Some(bad_line(n));
+                }
+                (l, bad.is_some())
+            }
             Err(e) => {
                 save_error = Some(format!("읽지 못했습니다: {e}"));
                 (vec![], true)
@@ -379,14 +390,15 @@ impl App {
 
     /// A new list (읽기, another folder) keeps the picked saved sound by name.
     /// A read of the save folder: on failure the list stays and that folder is not written until 읽기/쓰기.
-    fn take_list(&mut self, r: std::io::Result<Vec<Saved>>) {
-        self.write_blocked = r.is_err();
+    /// A line it could not parse also blocks writing; the parsed sounds are used.
+    fn take_list(&mut self, r: std::io::Result<(Vec<Saved>, Option<usize>)>) {
+        self.write_blocked = !matches!(r, Ok((_, None)));
         self.save_error = match r {
-            Ok(l) => {
+            Ok((l, bad)) => {
                 self.pick = repick(self.pick, &self.saved, &l);
                 self.saved = l;
                 self.readvise();
-                None
+                bad.map(bad_line)
             }
             Err(e) => Some(format!("읽지 못했습니다: {e}")),
         };
@@ -1505,7 +1517,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         assert_eq!(read_list(&d).unwrap_err().to_string(), "저장 폴더를 찾을 수 없습니다");
         std::fs::create_dir_all(&d).unwrap();
-        assert_eq!(read_list(&d).unwrap(), []);
+        assert_eq!(read_list(&d).unwrap(), (vec![], None));
         std::fs::remove_dir_all(&d).unwrap();
     }
     #[test] fn blocked_write_keeps_file() {
