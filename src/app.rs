@@ -179,10 +179,11 @@ fn flat_dialog(ctx: &egui::Context, group: &ChannelGroup) -> Option<Option<bool>
     let enter = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
     if cancel || m.should_close() {
         Some(None)
-    } else if flat || enter {
-        Some(Some(true))
+    } else if as_is {
+        // 포커스된 [그대로] 버튼의 Enter도 클릭이라 Enter(= 가운데)보다 먼저 봅니다.
+        Some(Some(false))
     } else {
-        as_is.then_some(Some(false))
+        (flat || enter).then_some(Some(true))
     }
 }
 
@@ -1844,6 +1845,23 @@ mod tests {
             assert!(matches!(v, KnobView::None));
             assert_eq!(header(&v), None);
         }
+    }
+    #[test] fn dialog_enter_on_focused_as_is_button() {
+        let g = &MixerFactory::create(MixerModel::MackieProFx22v3).groups[0];
+        let key = |key| vec![egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }];
+        let last = |frames: Vec<Vec<egui::Event>>| {
+            let ctx = egui::Context::default();
+            let mut r = None;
+            for events in frames {
+                ctx.run_ui(egui::RawInput { events, ..Default::default() }, |ui| r = flat_dialog(ui.ctx(), g)).textures_delta.clear();
+            }
+            r
+        };
+        // 포커스가 없으면 Enter는 가운데 분석.
+        assert_eq!(last(vec![vec![], key(egui::Key::Enter)]), Some(Some(true)));
+        // Tab 두 번이면 [지금 세팅 그대로 분석]에 포커스: 그 Enter는 버튼 클릭이라 그대로 분석입니다.
+        let tab = || key(egui::Key::Tab);
+        assert_eq!(last(vec![vec![], tab(), tab(), key(egui::Key::Enter)]), Some(Some(false)));
     }
     #[test] fn difference_note_only_when_different() {
         let (p, m, s) = knob_setup();
