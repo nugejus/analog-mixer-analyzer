@@ -562,6 +562,7 @@ impl App {
                 dynamic_range_db: s.dynamic_range_db,
                 bands_db: s.bands_db,
                 sample_rate: self.analysis.as_ref().map(|a| a.sample_rate.round() as u32),
+                flat: None,
             };
             saved::upsert(&mut self.saved, s);
             self.persist();
@@ -1569,7 +1570,7 @@ mod tests {
     }
 
     #[test] fn saved_goal_flags_other_channel() {
-        let s = Saved { name: "x".into(), mixer: "Mackie ProFX22v3 (2019, LEVEL SET LED)".into(), group: "CH1-12 (COMP)".into(), dynamic_range_db: 9.0, bands_db: [0.0; 25], sample_rate: Some(48_000) };
+        let s = Saved { name: "x".into(), mixer: "Mackie ProFX22v3 (2019, LEVEL SET LED)".into(), group: "CH1-12 (COMP)".into(), dynamic_range_db: 9.0, bands_db: [0.0; 25], sample_rate: Some(48_000), flat: None };
         let same = saved_goal(&s, &s.mixer, &s.group, Some(48_000.0));
         assert!(same.notes.is_empty() && same.restore_dr == Some(9.0) && same.db == s.bands_db);
         let other = saved_goal(&s, &s.mixer, "CH13-14", Some(48_000.0));
@@ -1593,13 +1594,13 @@ mod tests {
         let g = &MixerFactory::create(MixerModel::MackieProFx22v3).groups[0];
         let saved_now = natural(|f| hpf_db(100.0, f)); // 저장 때: 스위치 켜짐
         let s = Saved { name: "x".into(), mixer: "m".into(), group: g.label.into(),
-                        dynamic_range_db: 10.0, bands_db: saved_now.summary.as_ref().unwrap().bands_db, sample_rate: Some(48_000) };
+                        dynamic_range_db: 10.0, bands_db: saved_now.summary.as_ref().unwrap().bands_db, sample_rate: Some(48_000), flat: None };
         let a = advise(&natural(|_| 0.0), g, &saved_goal(&s, "m", g.label, Some(48_000.0))); // 지금: 꺼짐(가운데에서 시작)
         assert_eq!(knob(&a, "저역컷 100Hz"), Action::SwitchOn);
     }
 
     fn saved_sample(name: &str) -> Saved {
-        Saved { name: name.into(), mixer: "m".into(), group: "g".into(), dynamic_range_db: 9.0, bands_db: [0.0; 25], sample_rate: Some(48_000) }
+        Saved { name: name.into(), mixer: "m".into(), group: "g".into(), dynamic_range_db: 9.0, bands_db: [0.0; 25], sample_rate: Some(48_000), flat: None }
     }
     #[test] fn repick_follows_name() {
         let (a, b, c) = (saved_sample("a"), saved_sample("b"), saved_sample("c"));
