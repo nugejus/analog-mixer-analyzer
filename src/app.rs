@@ -247,7 +247,7 @@ impl App {
         };
         let model = MixerModel::MackieProFx22v3;
         let profile = MixerFactory::create(model);
-        let mut saved_path = saved::default_path();
+        let mut saved_path = saved::default_dir().map(|d| d.join(saved::FILE));
         // An existing file we cannot read must not be replaced by a shorter list: no path = persist refuses.
         let (saved, save_error) = match saved_path.as_deref().map(saved::load).transpose() {
             Ok(l) => (l.unwrap_or_default(), None),

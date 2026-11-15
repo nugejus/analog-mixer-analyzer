@@ -54,7 +54,11 @@ pub fn upsert(list: &mut Vec<Saved>, s: Saved) {
     }
 }
 
-pub fn default_path() -> Option<PathBuf> {
+pub const FILE: &str = "saved.tsv";
+const REMEMBER: &str = "folder.txt";
+
+/// Folder holding `saved.tsv` unless the user picked another (see `remembered_dir`).
+pub fn default_dir() -> Option<PathBuf> {
     let env = |k| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
     let base = if cfg!(target_os = "macos") {
         env("HOME")?.join("Library/Application Support")
@@ -63,7 +67,36 @@ pub fn default_path() -> Option<PathBuf> {
     } else {
         env("HOME")?.join(".local/share")
     };
-    Some(base.join("MixerAnalyzer").join("saved.tsv"))
+    Some(base.join("MixerAnalyzer"))
+}
+
+/// The folder last picked, from `folder.txt` in the default folder; blank or unreadable = None.
+pub fn remembered_dir(default: &Path) -> Option<PathBuf> {
+    let s = std::fs::read_to_string(default.join(REMEMBER)).ok()?;
+    Some(s.trim()).filter(|s| !s.is_empty()).map(PathBuf::from)
+}
+
+/// Remembers `dir` as the save folder.
+pub fn remember_dir(default: &Path, dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(default)?;
+    std::fs::write(default.join(REMEMBER), format!("{}\n", dir.display()))
+}
+
+/// Switch to `dir`: its `saved.tsv` if there is one, else move `current` into it.
+pub fn adopt(dir: &Path, current: &[Saved]) -> std::io::Result<Vec<Saved>> {
+    let p = dir.join(FILE);
+    if p.try_exists()? {
+        return load(&p);
+    }
+    store(&p, current)?;
+    Ok(current.to_vec())
+}
+
+/// Shows `dir` in the file manager without waiting (explorer exits 1 even on success).
+pub fn open_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let opener = if cfg!(target_os = "macos") { "open" } else if cfg!(windows) { "explorer" } else { "xdg-open" };
+    std::process::Command::new(opener).arg(dir).spawn().map(drop)
 }
 
 /// Missing file = empty list; any other read error is returned so the caller never overwrites a file it could not read.
@@ -127,5 +160,39 @@ mod tests {
         assert!(load(&p).is_err());
         assert!(load(&p.join("missing.tsv")).unwrap().is_empty());
         std::fs::remove_dir_all(&p).unwrap();
+    }
+    fn temp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("mixer-analyzer-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        d
+    }
+    #[test] fn remember_dir_roundtrip() {
+        let d = temp("remember");
+        assert_eq!(remembered_dir(&d), None);
+        remember_dir(&d, Path::new("/x/y z")).unwrap();
+        assert_eq!(remembered_dir(&d), Some(PathBuf::from("/x/y z")));
+        std::fs::write(d.join("folder.txt"), "  \n").unwrap();
+        assert_eq!(remembered_dir(&d), None);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+    #[test] fn adopt_reads_existing_file() {
+        let d = temp("adopt-read");
+        store(&d.join(FILE), &[sample("a")]).unwrap();
+        assert_eq!(adopt(&d, &[sample("b")]).unwrap(), [sample("a")]);
+        assert_eq!(load(&d.join(FILE)).unwrap(), [sample("a")]);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+    #[test] fn adopt_moves_list_into_empty_folder() {
+        let d = temp("adopt-move").join("new");
+        let l = vec![sample("a"), sample("b")];
+        assert_eq!(adopt(&d, &l).unwrap(), l);
+        assert_eq!(load(&d.join(FILE)).unwrap(), l);
+        std::fs::remove_dir_all(d.parent().unwrap()).unwrap();
+    }
+    #[test] fn adopt_reports_unreadable_file() {
+        let d = temp("adopt-bad");
+        std::fs::create_dir_all(d.join(FILE)).unwrap(); // a folder where the file should be
+        assert!(adopt(&d, &[sample("a")]).is_err());
+        std::fs::remove_dir_all(&d).unwrap();
     }
 }
