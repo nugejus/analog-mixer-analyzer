@@ -1205,9 +1205,12 @@ impl eframe::App for App {
                 ui.colored_label(mocha::RED, advice::NO_INPUT);
             }
             if let Some(a) = advice {
-                ui.strong(summary.map_or("노브 추천".into(), |s| {
-                    format!("노브 추천 — 말소리 {:.1}초 분석", s.active_seconds)
-                }));
+                ui.horizontal(|ui| {
+                    ui.strong(summary.map_or("노브 추천".into(), |s| {
+                        format!("노브 추천 — 말소리 {:.1}초 분석", s.active_seconds)
+                    }));
+                    ui.colored_label(mocha::SUBTEXT0, "각도는 가운데(12시)에서 돌릴 양");
+                });
                 knob_row(ui, &a.knobs);
             } else if rec.is_none() {
                 ui.label(format!(
