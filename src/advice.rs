@@ -357,7 +357,7 @@ fn summary(dev: impl Fn(f32) -> f32) -> Summary {
     let t = ltass_db(Voice::Male);
     let mut bands = [0.0; 25];
     for (i, b) in bands.iter_mut().enumerate() { *b = t[i] - 40.0 + dev(BANDS_HZ[i]); }
-    Summary { bands_db: bands, display_db: vec![], peak_db: -12.0, rms_db: -30.0, noise_floor_db: -80.0, snr_db: 50.0,
+    Summary { bands_db: bands, bin_power: vec![], peak_db: -12.0, rms_db: -30.0, noise_floor_db: -80.0, snr_db: 50.0,
               dynamic_range_db: 10.0, crest_db: 18.0, active_seconds: 4.0 }
 }
 fn run(e: &mut AdviceEngine, g: &ChannelGroup, s: &Summary) -> AdviceSet {

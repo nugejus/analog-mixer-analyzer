@@ -3,7 +3,8 @@ use crate::spectrum::{Frame, db};
 #[derive(Clone, Debug)]
 pub struct Summary {
     pub bands_db: [f32; 25],
-    pub display_db: Vec<f32>,
+    /// Per-bin linear power averaged over active frames.
+    pub bin_power: Vec<f32>,
     pub peak_db: f32,
     pub rms_db: f32,
     pub noise_floor_db: f32,
@@ -15,7 +16,7 @@ pub struct Summary {
 
 pub struct SpeechStats {
     hop: f32,
-    // (rms_db, peak_db, bands_db, display_db)
+    // (rms_db, peak_db, bands_db, bin_power)
     frames: Vec<(f32, f32, [f32; 25], Vec<f32>)>,
 }
 
@@ -34,9 +35,9 @@ impl SpeechStats {
         self.frames.len()
     }
 
-    pub fn push(&mut self, frame: &Frame, bands_db: &[f32; 25], display_db: &[f32]) {
+    pub fn push(&mut self, frame: &Frame, bands_db: &[f32; 25]) {
         let peak_db = db(frame.peak * frame.peak);
-        self.frames.push((frame.rms_db, peak_db, *bands_db, display_db.to_vec()));
+        self.frames.push((frame.rms_db, peak_db, *bands_db, frame.bin_power.clone()));
     }
 
     /// Judged at the end: the floor is the whole recording's minimum RMS.
@@ -57,8 +58,8 @@ impl SpeechStats {
         for (b, out) in bands_db.iter_mut().enumerate() {
             *out = db(act.iter().map(|f| pow(f.2[b])).sum::<f32>() / nf);
         }
-        let display_db = (0..act[0].3.len())
-            .map(|i| db(act.iter().map(|f| pow(f.3[i])).sum::<f32>() / nf))
+        let bin_power = (0..act[0].3.len())
+            .map(|i| act.iter().map(|f| f.3[i]).sum::<f32>() / nf)
             .collect();
         let rms_db = db(act.iter().map(|f| pow(f.0)).sum::<f32>() / nf);
         let peak_db = act.iter().map(|f| f.1).fold(f32::NEG_INFINITY, f32::max);
@@ -67,7 +68,7 @@ impl SpeechStats {
         let at = |p: f32| r[(p * (n - 1) as f32).round() as usize];
         Some(Summary {
             bands_db,
-            display_db,
+            bin_power,
             peak_db,
             rms_db,
             noise_floor_db: floor,
@@ -85,14 +86,13 @@ mod tests {
     use crate::spectrum::FLOOR_DB;
 
     const HOP_S: f32 = 4096.0 / 48_000.0;
-    fn feed(s: &mut SpeechStats, n: usize, rms: f32, peak_db: f32, band0: f32, display: &[f32]) {
+    fn feed(s: &mut SpeechStats, n: usize, rms: f32, peak_db: f32, band0: f32, bin_power: &[f32]) {
         for _ in 0..n {
             let mut b = [-100.0; 25];
             b[0] = band0;
             s.push(
-                &Frame { bin_power: vec![], rms_db: rms, peak: 10f32.powf(peak_db / 20.0) },
+                &Frame { bin_power: bin_power.to_vec(), rms_db: rms, peak: 10f32.powf(peak_db / 20.0) },
                 &b,
-                display,
             );
         }
     }
@@ -142,14 +142,13 @@ mod tests {
         assert!((s.summary().unwrap().bands_db[0] - 10.0 * (0.11f32 / 2.0).log10()).abs() < 0.05);
     }
     #[test]
-    fn display_is_power_averaged_over_active_frames() {
+    fn bin_power_is_mean_over_active_frames() {
         let mut s = SpeechStats::new(HOP_S);
-        feed(&mut s, 20, -70.0, -60.0, -90.0, &[-90.0, -90.0]);
-        feed(&mut s, 30, -20.0, -6.0, -10.0, &[-10.0, -30.0]);
-        feed(&mut s, 30, -20.0, -6.0, -10.0, &[-20.0, -30.0]);
-        let d = s.summary().unwrap().display_db;
-        assert!((d[0] - 10.0 * 0.055f32.log10()).abs() < 0.05);
-        assert!((d[1] + 30.0).abs() < 0.05);
+        feed(&mut s, 20, -70.0, -60.0, -90.0, &[1.0, 1.0]);
+        feed(&mut s, 30, -20.0, -6.0, -10.0, &[0.1, 0.001]);
+        feed(&mut s, 30, -20.0, -6.0, -10.0, &[0.01, 0.001]);
+        let p = s.summary().unwrap().bin_power;
+        assert!((p[0] - 0.055).abs() < 1e-6 && (p[1] - 0.001).abs() < 1e-7, "{p:?}");
     }
     #[test]
     fn dynamic_range_is_p90_minus_p10() {

@@ -99,23 +99,26 @@ pub fn third_octave_db(bin_power: &[f32], sample_rate: f32) -> [f32; 25] {
 }
 
 /// dB to subtract from a third-octave band level to compare with a display point.
-pub fn display_to_band_db(hz: f32, sample_rate: f32) -> f32 {
+pub fn display_to_band_db(hz: f32, sample_rate: f32, per_oct: usize) -> f32 {
     let w3 = hz * (2f32.powf(1.0 / 6.0) - 2f32.powf(-1.0 / 6.0));
-    let w24 = hz * (2f32.powf(1.0 / 48.0) - 2f32.powf(-1.0 / 48.0));
-    10.0 * (w3 / w24.max(sample_rate / FFT_SIZE as f32)).log10()
+    let h = 2f32.powf(0.5 / per_oct as f32);
+    let wn = hz * (h - 1.0 / h);
+    10.0 * (w3 / wn.max(sample_rate / FFT_SIZE as f32)).log10()
 }
 
-pub fn display_freqs() -> Vec<f32> {
-    (0..=239)
-        .map(|i| 20.0 * 2f32.powf(i as f32 / 24.0))
+/// 20 Hz upward at `per_oct` points per octave, below 20 kHz.
+pub fn display_freqs(per_oct: usize) -> Vec<f32> {
+    let n = per_oct as f32;
+    (0..=(n * 1000f32.log2()).floor() as usize)
+        .map(|i| 20.0 * 2f32.powf(i as f32 / n))
         .collect()
 }
 
-pub fn display_db(bin_power: &[f32], sample_rate: f32) -> Vec<f32> {
-    let half = 2f32.powf(1.0 / 48.0);
+pub fn display_db(bin_power: &[f32], sample_rate: f32, per_oct: usize) -> Vec<f32> {
+    let half = 2f32.powf(0.5 / per_oct as f32);
     let bw = sample_rate / FFT_SIZE as f32;
     let last = bin_power.len() - 1;
-    display_freqs()
+    display_freqs(per_oct)
         .into_iter()
         .map(|f| {
             let k_lo = (f / half / bw).ceil() as usize;
@@ -164,13 +167,16 @@ mod tests {
     #[test]
     fn display_to_band_db_matches_widths() {
         let near = |a: f32, b: f32| assert!((a - b).abs() < 0.05, "{a} vs {b}");
-        near(display_to_band_db(1000.0, 48000.0), 9.03);
+        near(display_to_band_db(1000.0, 48000.0, 24), 9.03);
+        near(display_to_band_db(1000.0, 48000.0, 12), 6.03);
+        near(display_to_band_db(1000.0, 48000.0, 48), 12.05);
+        near(display_to_band_db(1000.0, 48000.0, 96), 15.06);
         near(
-            display_to_band_db(63.0, 48000.0),
+            display_to_band_db(63.0, 48000.0, 24),
             10.0 * (63.0f32 * 0.23156 / 5.859375).log10(),
         );
         near(
-            display_to_band_db(63.0, 96000.0),
+            display_to_band_db(63.0, 96000.0, 24),
             10.0 * (63.0f32 * 0.23156 / 11.71875).log10(),
         );
     }
@@ -182,21 +188,21 @@ mod tests {
         let mut disp = vec![0.0f32; 240];
         let mut bands = [0.0f32; 25];
         for f in &frames {
-            for (a, d) in disp.iter_mut().zip(display_db(&f.bin_power, sr)) {
+            for (a, d) in disp.iter_mut().zip(display_db(&f.bin_power, sr, 24)) {
                 *a += 10f32.powf(d / 10.0) / n;
             }
             for (a, d) in bands.iter_mut().zip(third_octave_db(&f.bin_power, sr)) {
                 *a += 10f32.powf(d / 10.0) / n;
             }
         }
-        let freqs = display_freqs();
+        let freqs = display_freqs(24);
         for hz in [63.0, 125.0, 1000.0, 4000.0] {
             let i = BANDS_HZ.iter().position(|&b| b == hz).unwrap();
             let j = (0..240)
                 .min_by(|&a, &b| (freqs[a] - hz).abs().total_cmp(&(freqs[b] - hz).abs()))
                 .unwrap();
             let got = 10.0 * disp[j].log10();
-            let want = 10.0 * bands[i].log10() - display_to_band_db(hz, sr);
+            let want = 10.0 * bands[i].log10() - display_to_band_db(hz, sr, 24);
             println!(
                 "{hz} Hz: point {} Hz display {got:.2} expected {want:.2} diff {:.2}",
                 freqs[j],
@@ -240,7 +246,7 @@ mod tests {
         );
         assert_eq!(f.rms_db, FLOOR_DB);
         assert!(
-            display_db(&f.bin_power, 48_000.0)
+            display_db(&f.bin_power, 48_000.0, 24)
                 .iter()
                 .all(|b| b.is_finite())
         );
@@ -257,12 +263,26 @@ mod tests {
         assert_eq!(n, 2);
     }
     #[test]
-    fn display_has_240_points_at_24th_octave() {
-        let f = display_freqs();
-        assert_eq!(f.len(), 240);
-        assert_eq!(f[0], 20.0);
-        assert!((f[24] - 40.0).abs() < 1e-3);
-        assert!(*f.last().unwrap() < 20_000.0);
+    fn display_point_counts_per_resolution() {
+        for (n, len) in [(12, 120), (24, 240), (48, 479), (96, 957)] {
+            let f = display_freqs(n);
+            assert_eq!(f.len(), len, "{n}");
+            assert_eq!(f[0], 20.0);
+            assert!((f[n] - 40.0).abs() < 1e-2, "{n}");
+            assert!(*f.last().unwrap() < 20_000.0);
+        }
+    }
+    #[test]
+    fn display_of_mean_bins_equals_mean_of_displays() {
+        let sr = 48_000.0;
+        let a = Spectrum::new(sr).push(&sine(sr, 1000.0, 0.5, 1.0)).pop().unwrap().bin_power;
+        let b = Spectrum::new(sr).push(&noise(48_000, 0.3)).pop().unwrap().bin_power;
+        let mean: Vec<f32> = a.iter().zip(&b).map(|(x, y)| (x + y) / 2.0).collect();
+        let (da, db_, dm) = (display_db(&a, sr, 48), display_db(&b, sr, 48), display_db(&mean, sr, 48));
+        for i in 0..dm.len() {
+            let want = db((10f32.powf(da[i] / 10.0) + 10f32.powf(db_[i] / 10.0)) / 2.0);
+            assert!((dm[i] - want).abs() < 0.01, "{i}: {} vs {want}", dm[i]);
+        }
     }
     #[test]
     fn display_point_holds_tone_power() {
@@ -272,7 +292,7 @@ mod tests {
             .push(&sine(sr, hz, 0.5, 1.0))
             .pop()
             .unwrap();
-        let d = display_db(&f.bin_power, sr);
+        let d = display_db(&f.bin_power, sr, 24);
         assert!((d[136] + 9.03).abs() < 1.0, "{}", d[136]);
     }
     #[test]
@@ -282,10 +302,10 @@ mod tests {
             .push(&sine(sr, 50.0, 0.5, 1.0))
             .pop()
             .unwrap();
-        let d = display_db(&f.bin_power, sr);
+        let d = display_db(&f.bin_power, sr, 24);
         assert!(d.iter().all(|v| v.is_finite()));
         assert!(d[32] > -15.0, "{}", d[32]); // 20*2^(32/24) = 50.4 Hz
-        let hi = display_freqs().iter().position(|&x| x > 200.0).unwrap();
+        let hi = display_freqs(24).iter().position(|&x| x > 200.0).unwrap();
         assert!(d[hi..].iter().all(|&v| v < -40.0));
     }
     #[test]
