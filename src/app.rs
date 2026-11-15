@@ -317,8 +317,8 @@ fn knob_view(
         return KnobView::Stored(k);
     }
     match (last_flat.filter(|l| l.fits(mixer, group.label, a.sample_rate)), &a.summary) {
-        // 말소리 부족·낮은 샘플레이트는 엔진처럼 노브 이름과 그 노트로 알립니다.
-        _ if a.summary.is_none() || a.sample_rate < MIN_RATE => KnobView::Advice(advise(a, group, goal)),
+        // 말소리 부족·낮은 샘플레이트는 규칙 4처럼 노브 이름과 엔진의 그 노트로 알립니다(첫 노트가 그 이유).
+        _ if a.summary.is_none() || a.sample_rate < MIN_RATE => KnobView::Names(advise(a, group, goal).notes.remove(0)),
         (Some(l), Some(s)) => advice::knob_positions(group, &l.summary, &s.bands_db, s.dynamic_range_db)
             .map_or_else(|| KnobView::Names(UNSURE.into()), KnobView::Estimate),
         _ => KnobView::Names(NEED_FLAT.into()),
@@ -1833,9 +1833,14 @@ mod tests {
             assert!(matches!(&v, KnobView::Names(n) if n == names));
             assert_eq!(header(&v), None);
         }
-        // 그대로 분석이 말소리 부족이면 그 노트(잘못된 추천 없음).
+        // 그대로 분석이 말소리 부족이나 낮은 샘플레이트면 규칙 4처럼 그 노트만(가운데 추천 머리글 없음).
         let short = as_is(Analysis { summary: None, ..natural(|_| 0.0) });
-        assert!(matches!(view(Some(&short), None, Some(&lf)), KnobView::Advice(a) if a.knobs.iter().all(|k| k.action == Action::Wait)));
+        let low_rate = Analysis { sample_rate: 32_000.0, ..as_is(natural(|_| 0.0)) };
+        for (a, why) in [(&short, "말소리가 부족합니다"), (&low_rate, "입력 샘플레이트가 32kHz")] {
+            let v = view(Some(a), None, Some(&lf));
+            assert!(matches!(&v, KnobView::Names(n) if n.starts_with(why)), "{why}");
+            assert_eq!(header(&v), None);
+        }
         // 3이어도 노브가 끝까지 가면(그사이 말하는 사람·마이크가 바뀜) 추정하지 않습니다.
         let far = as_is(natural(|f| 20.0 * advice::Shape::LowShelf(80.0).response(f)));
         assert!(matches!(view(Some(&far), None, Some(&lf)), KnobView::Names(n) if n == UNSURE));
