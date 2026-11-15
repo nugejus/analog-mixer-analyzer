@@ -109,7 +109,7 @@ pub struct Advice {
 pub struct AdviceSet {
     pub knobs: Vec<Advice>,
     pub notes: Vec<String>,
-    /// spec 식의 c(측정 + c ≈ 목표). 추천이 없으면 0.
+    /// −c(spec 식의 c): 측정 ≈ 목표 + level_offset_db. 추천이 없으면 0.
     pub level_offset_db: f32,
 }
 
@@ -342,7 +342,7 @@ impl AdviceEngine {
         AdviceSet {
             knobs: knobs(group, |i, f| if f { freq_act[i].clone() } else { main[i].clone() }),
             notes,
-            level_offset_db: c,
+            level_offset_db: -c,
         }
     }
 }
@@ -368,6 +368,10 @@ fn group(m: MixerModel, i: usize) -> ChannelGroup { MixerFactory::create(m).grou
 const V3: MixerModel = MixerModel::MackieProFx22v3;
 const FX12: MixerModel = MixerModel::MackieProFx12v3;
 
+#[test] fn level_offset_maps_target_onto_measured() {
+    let a = run(&mut AdviceEngine::new(), &group(V3, 0), &summary(|_| 0.0));
+    assert!((a.level_offset_db + 40.0).abs() < 0.01, "{}", a.level_offset_db);
+}
 #[test] fn flat_gives_all_ok() {
     let a = run(&mut AdviceEngine::new(), &group(V3, 0), &summary(|_| 0.0));
     assert_eq!(a.knobs.len(), 7);
