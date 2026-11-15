@@ -238,17 +238,17 @@ mod tests {
 
     #[test]
     fn level_match_ignores_a_few_loud_bands() {
-    let goal = [-40.0f32; 25];
-    let mut m = goal.map(|g| g + 5.0);
-    assert!((level_match_db(&m, &goal) - 5.0).abs() < 1e-4);
-    for v in &mut m[11..=18] {
-        *v += 8.0; // 800 Hz–4 kHz: 8 of the 22 matched bands
+        let goal = [-40.0f32; 25];
+        let mut m = goal.map(|g| g + 5.0);
+        assert!((level_match_db(&m, &goal) - 5.0).abs() < 1e-4);
+        for v in &mut m[11..=18] {
+            *v += 8.0; // 800 Hz–4 kHz: 8 of the 22 matched bands
+        }
+        assert!((level_match_db(&m, &goal) - 5.0).abs() < 1e-4);
     }
-    assert!((level_match_db(&m, &goal) - 5.0).abs() < 1e-4);
-}
 
-#[test]
-fn tone_excess_follows_reference_level() {
+    #[test]
+    fn tone_excess_follows_reference_level() {
         let reference = [-40.0f32; 25];
         let mut m = reference;
         m[14..=16].iter_mut().for_each(|v| *v += 6.0); // 1600, 2000, 2500 = 까랑함
