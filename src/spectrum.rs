@@ -98,7 +98,12 @@ pub fn third_octave_db(bin_power: &[f32], sample_rate: f32) -> [f32; 25] {
     BANDS_HZ.map(|fc| band_db(bin_power, sample_rate, fc / edge, fc * edge))
 }
 
-pub const DISPLAY_TO_BAND_DB: f32 = 9.03;
+/// dB to subtract from a third-octave band level to compare with a display point.
+pub fn display_to_band_db(hz: f32, sample_rate: f32) -> f32 {
+    let w3 = hz * (2f32.powf(1.0 / 6.0) - 2f32.powf(-1.0 / 6.0));
+    let w24 = hz * (2f32.powf(1.0 / 48.0) - 2f32.powf(-1.0 / 48.0));
+    10.0 * (w3 / w24.max(sample_rate / FFT_SIZE as f32)).log10()
+}
 
 pub fn display_freqs() -> Vec<f32> {
     (0..=239)
@@ -156,6 +161,50 @@ mod tests {
     use super::*;
     use crate::{target::BANDS_HZ, testsig::*};
 
+    #[test]
+    fn display_to_band_db_matches_widths() {
+        let near = |a: f32, b: f32| assert!((a - b).abs() < 0.05, "{a} vs {b}");
+        near(display_to_band_db(1000.0, 48000.0), 9.03);
+        near(
+            display_to_band_db(63.0, 48000.0),
+            10.0 * (63.0f32 * 0.23156 / 5.859375).log10(),
+        );
+        near(
+            display_to_band_db(63.0, 96000.0),
+            10.0 * (63.0f32 * 0.23156 / 11.71875).log10(),
+        );
+    }
+    #[test]
+    fn target_shift_tracks_white_noise() {
+        let sr = 48_000.0;
+        let frames = Spectrum::new(sr).push(&noise(48_000 * 5, 0.5));
+        let n = frames.len() as f32;
+        let mut disp = vec![0.0f32; 240];
+        let mut bands = [0.0f32; 25];
+        for f in &frames {
+            for (a, d) in disp.iter_mut().zip(display_db(&f.bin_power, sr)) {
+                *a += 10f32.powf(d / 10.0) / n;
+            }
+            for (a, d) in bands.iter_mut().zip(third_octave_db(&f.bin_power, sr)) {
+                *a += 10f32.powf(d / 10.0) / n;
+            }
+        }
+        let freqs = display_freqs();
+        for hz in [63.0, 125.0, 1000.0, 4000.0] {
+            let i = BANDS_HZ.iter().position(|&b| b == hz).unwrap();
+            let j = (0..240)
+                .min_by(|&a, &b| (freqs[a] - hz).abs().total_cmp(&(freqs[b] - hz).abs()))
+                .unwrap();
+            let got = 10.0 * disp[j].log10();
+            let want = 10.0 * bands[i].log10() - display_to_band_db(hz, sr);
+            println!(
+                "{hz} Hz: point {} Hz display {got:.2} expected {want:.2} diff {:.2}",
+                freqs[j],
+                got - want
+            );
+            assert!((got - want).abs() < 1.5, "{hz}: {got} vs {want}");
+        }
+    }
     #[test]
     fn sine_reads_rms_level_at_any_rate() {
         for sr in [44_100.0, 48_000.0, 96_000.0] {

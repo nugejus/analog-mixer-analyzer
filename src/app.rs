@@ -586,9 +586,15 @@ impl eframe::App for App {
         });
         egui::CentralPanel::default().show(ui, |ui| match &self.live {
             Ok(live) => {
-                let offset =
-                    advice.map_or(0.0, |a| a.level_offset_db) - spectrum::DISPLAY_TO_BAND_DB;
-                let target = summary.map(|_| ltass_db(self.voice).map(|t| t + offset));
+                let offset = advice.map_or(0.0, |a| a.level_offset_db);
+                let sr = live.input.sample_rate;
+                let target = summary.map(|_| {
+                    let mut t = ltass_db(self.voice);
+                    for (v, hz) in t.iter_mut().zip(BANDS_HZ) {
+                        *v += offset - spectrum::display_to_band_db(hz, sr);
+                    }
+                    t
+                });
                 let h = (ui.available_height() - 90.0).max(120.0);
                 ui.strong("실시간 주파수 그래프");
                 let result = summary.map(|s| s.display_db.as_slice());
