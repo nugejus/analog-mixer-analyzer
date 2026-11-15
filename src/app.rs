@@ -69,8 +69,11 @@ impl Live {
             self.speech
                 .push(&f, &spectrum::third_octave_db(&f.bin_power, sr));
             self.howl = self.feedback.push(&f.bin_power);
-            self.curve
-                .update(&spectrum::display_db(&f.bin_power, sr), HOP as f32 / sr);
+            self.curve.update(
+                &spectrum::display_db(&f.bin_power, sr),
+                HOP as f32 / sr,
+                1.0,
+            );
         }
     }
 
@@ -446,7 +449,8 @@ impl eframe::App for App {
         });
         egui::CentralPanel::default().show(ui, |ui| match &self.live {
             Ok(live) => {
-                let offset = advice.map_or(0.0, |a| a.level_offset_db) - 3.01;
+                let offset =
+                    advice.map_or(0.0, |a| a.level_offset_db) - spectrum::DISPLAY_TO_BAND_DB;
                 let target = ltass_db(self.voice).map(|t| t + offset);
                 let h = (ui.available_height() - 90.0).max(120.0);
                 ui.strong("실시간 주파수 그래프");

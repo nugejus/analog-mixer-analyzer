@@ -98,41 +98,35 @@ pub fn third_octave_db(bin_power: &[f32], sample_rate: f32) -> [f32; 25] {
     BANDS_HZ.map(|fc| band_db(bin_power, sample_rate, fc / edge, fc * edge))
 }
 
+pub const DISPLAY_TO_BAND_DB: f32 = 9.03;
+
 pub fn display_freqs() -> Vec<f32> {
-    (0..=60).map(|i| 20.0 * 2f32.powf(i as f32 / 6.0)).collect()
+    (0..=239)
+        .map(|i| 20.0 * 2f32.powf(i as f32 / 24.0))
+        .collect()
 }
 
 pub fn display_db(bin_power: &[f32], sample_rate: f32) -> Vec<f32> {
-    let half = 2f32.powf(1.0 / 12.0);
+    let half = 2f32.powf(1.0 / 48.0);
     let bw = sample_rate / FFT_SIZE as f32;
+    let last = bin_power.len() - 1;
     display_freqs()
         .into_iter()
         .map(|f| {
-            let (lo, hi) = (f / half, f * half);
-            let mut hits = bin_power
-                .iter()
-                .enumerate()
-                .filter(|&(k, _)| (lo..=hi).contains(&(k as f32 * bw)))
-                .map(|(_, p)| *p)
-                .peekable();
-            if hits.peek().is_some() {
-                db(hits.sum())
+            let k_lo = (f / half / bw).ceil() as usize;
+            let k_hi = ((f * half / bw).floor() as usize).min(last);
+            if k_lo <= k_hi {
+                db(bin_power[k_lo..=k_hi].iter().sum())
             } else {
-                let k = ((f / bw).round() as usize).min(bin_power.len() - 1);
-                db(bin_power[k])
+                db(bin_power[((f / bw).round() as usize).min(last)])
             }
         })
         .collect()
 }
 
-const TAU_SMOOTH: f32 = 0.3;
-const PEAK_HOLD_S: f32 = 1.5;
-const PEAK_FALL_DB_S: f32 = 12.0;
-
 pub struct DisplayCurve {
     pub smooth_db: Vec<f32>,
     pub peak_db: Vec<f32>,
-    held_s: Vec<f32>,
 }
 
 impl DisplayCurve {
@@ -140,25 +134,20 @@ impl DisplayCurve {
         Self {
             smooth_db: vec![FLOOR_DB; len],
             peak_db: vec![FLOOR_DB; len],
-            held_s: vec![0.0; len],
         }
     }
 
-    pub fn update(&mut self, frame_db: &[f32], dt: f32) {
-        let a = 1.0 - (-dt / TAU_SMOOTH).exp();
+    pub fn update(&mut self, frame_db: &[f32], dt: f32, tau_s: f32) {
+        let a = 1.0 - (-dt / tau_s).exp();
         for (i, &f) in frame_db.iter().enumerate() {
             let (s, p) = (10f32.powf(self.smooth_db[i] / 10.0), 10f32.powf(f / 10.0));
             self.smooth_db[i] = db(s + a * (p - s));
-            if f >= self.peak_db[i] {
-                self.peak_db[i] = f;
-                self.held_s[i] = 0.0;
-            } else {
-                self.held_s[i] += dt;
-                if self.held_s[i] > PEAK_HOLD_S {
-                    self.peak_db[i] = (self.peak_db[i] - PEAK_FALL_DB_S * dt).max(f);
-                }
-            }
+            self.peak_db[i] = self.peak_db[i].max(f);
         }
+    }
+
+    pub fn reset_peak(&mut self) {
+        self.peak_db.fill(FLOOR_DB);
     }
 }
 
@@ -219,17 +208,60 @@ mod tests {
         assert_eq!(n, 2);
     }
     #[test]
-    fn peak_hold_then_decay() {
+    fn display_has_240_points_at_24th_octave() {
+        let f = display_freqs();
+        assert_eq!(f.len(), 240);
+        assert_eq!(f[0], 20.0);
+        assert!((f[24] - 40.0).abs() < 1e-3);
+        assert!(*f.last().unwrap() < 20_000.0);
+    }
+    #[test]
+    fn display_point_holds_tone_power() {
+        let sr = 48_000.0;
+        let hz = 20.0 * 2f32.powf(136.0 / 24.0);
+        let f = Spectrum::new(sr)
+            .push(&sine(sr, hz, 0.5, 1.0))
+            .pop()
+            .unwrap();
+        let d = display_db(&f.bin_power, sr);
+        assert!((d[136] + 9.03).abs() < 1.0, "{}", d[136]);
+    }
+    #[test]
+    fn low_points_without_bins_use_nearest_bin() {
+        let sr = 48_000.0;
+        let f = Spectrum::new(sr)
+            .push(&sine(sr, 50.0, 0.5, 1.0))
+            .pop()
+            .unwrap();
+        let d = display_db(&f.bin_power, sr);
+        assert!(d.iter().all(|v| v.is_finite()));
+        assert!(d[32] > -15.0, "{}", d[32]); // 20*2^(32/24) = 50.4 Hz
+        let hi = display_freqs().iter().position(|&x| x > 200.0).unwrap();
+        assert!(d[hi..].iter().all(|&v| v < -40.0));
+    }
+    #[test]
+    fn peak_holds_until_reset() {
         let mut d = DisplayCurve::new(1);
-        d.update(&[-10.0], 0.1);
-        for _ in 0..10 {
-            d.update(&[-50.0], 0.1);
+        d.update(&[-10.0], 0.1, 1.0);
+        for _ in 0..100 {
+            d.update(&[-50.0], 0.1, 1.0);
         }
-        assert!((d.peak_db[0] + 10.0).abs() < 0.01);
-        for _ in 0..14 {
-            d.update(&[-50.0], 0.1);
-        }
-        assert!((d.peak_db[0] + 21.0).abs() < 1.5);
-        assert!(d.smooth_db[0] < -40.0);
+        assert_eq!(d.peak_db[0], -10.0);
+        d.reset_peak();
+        assert_eq!(d.peak_db[0], FLOOR_DB);
+        d.update(&[-50.0], 0.1, 1.0);
+        assert_eq!(d.peak_db[0], -50.0);
+    }
+    #[test]
+    fn ema_tau_sets_speed() {
+        let step = |tau: f32| {
+            let mut d = DisplayCurve::new(1);
+            for _ in 0..10 {
+                d.update(&[-10.0], 0.1, tau);
+            }
+            d.smooth_db[0]
+        };
+        assert!((step(0.3) + 10.16).abs() < 0.1, "{}", step(0.3));
+        assert!((step(3.0) + 15.47).abs() < 0.1, "{}", step(3.0));
     }
 }
