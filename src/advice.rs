@@ -272,24 +272,47 @@ impl AdviceEngine {
         };
 
         // 스윕 MID: 후보 중 잔차 최소, 지난 주파수보다 20% 이상 좋을 때만 바꿈. 둘이면 좌표 하강 2회.
+        // 다만 지난 주파수가 없는 두 스윕(앱은 늘 새 엔진)은 모든 쌍을 봅니다. 좌표 하강은 엉뚱한 쌍에 갇혀
+        // 다른 노브를 ±15 dB 끝까지 돌리기도 합니다(Signature 22). 후보는 많아야 14×15쌍입니다.
         let sweeps: Vec<usize> = eq.iter().copied().filter(|&i| sweep(ctl[i]).is_some()).collect();
-        for _ in 0..sweeps.len().min(2) {
-            for &i in &sweeps {
-                let resid = |f: f32| {
+        if let [a, b] = sweeps[..]
+            && self.freq[a].is_none()
+            && self.freq[b].is_none()
+        {
+            let cb = cands(sweep(ctl[b]).expect("sweep"));
+            let best = cands(sweep(ctl[a]).expect("sweep"))
+                .into_iter()
+                .flat_map(|fa| cb.iter().map(move |&fb| (fa, fb)))
+                .filter(|(fa, fb)| (fa / fb).log2().abs() >= 1.0) // 아래와 같은 1옥타브 가드
+                .map(|(fa, fb)| {
                     let mut h = hz.clone();
-                    h[i] = f;
-                    fit_eq(&d, &shapes(&h)).2
-                };
-                // 두 스윕이 같은 주파수에서 게인을 반씩 나누면 둘 다 ✓가 되므로 1옥타브 이상 떨어뜨립니다.
-                let best = cands(sweep(ctl[i]).expect("sweep"))
-                    .into_iter()
-                    .filter(|&f| sweeps.iter().all(|&j| j == i || (f / hz[j]).log2().abs() >= 1.0))
-                    .map(|f| (f, resid(f)))
-                    .min_by(|a, b| a.1.total_cmp(&b.1));
-                if let Some((f, r)) = best
-                    && (self.freq[i].is_none() || r < 0.8 * resid(hz[i]))
-                {
-                    hz[i] = f;
+                    (h[a], h[b]) = (fa, fb);
+                    let r = fit_eq(&d, &shapes(&h)).2;
+                    (h, r)
+                })
+                .min_by(|p, q| p.1.total_cmp(&q.1));
+            if let Some((h, _)) = best {
+                hz = h;
+            }
+        } else {
+            for _ in 0..sweeps.len().min(2) {
+                for &i in &sweeps {
+                    let resid = |f: f32| {
+                        let mut h = hz.clone();
+                        h[i] = f;
+                        fit_eq(&d, &shapes(&h)).2
+                    };
+                    // 두 스윕이 같은 주파수에서 게인을 반씩 나누면 둘 다 ✓가 되므로 1옥타브 이상 떨어뜨립니다.
+                    let best = cands(sweep(ctl[i]).expect("sweep"))
+                        .into_iter()
+                        .filter(|&f| sweeps.iter().all(|&j| j == i || (f / hz[j]).log2().abs() >= 1.0))
+                        .map(|f| (f, resid(f)))
+                        .min_by(|a, b| a.1.total_cmp(&b.1));
+                    if let Some((f, r)) = best
+                        && (self.freq[i].is_none() || r < 0.8 * resid(hz[i]))
+                    {
+                        hz[i] = f;
+                    }
                 }
             }
         }
@@ -435,8 +458,11 @@ pub fn neutral_summary(bands_db: [f32; 25], dynamic_range_db: f32) -> Summary {
 }
 
 /// 같은 라벨끼리 EQ 노브가 3 dB 이상(✓는 0 dB), FREQ가 한 칸(1/3옥타브) 넘게, 또는 저역컷 켜기 여부가 다르면 참.
-/// 한쪽에만 있는 라벨은 무시합니다.
+/// 한쪽에만 있는 라벨은 무시하고, 한쪽이 Wait(말소리 부족)면 비교할 추천이 없으니 거짓입니다.
 pub fn knobs_differ(a: &[Advice], b: &[Advice]) -> bool {
+    if a.iter().chain(b).any(|k| k.action == Action::Wait) {
+        return false;
+    }
     let db = |x: &Action| match *x {
         Action::Rotate { db, .. } => db,
         _ => 0.0,
@@ -691,10 +717,31 @@ fn at(k: &[Advice], label: &str) -> Action { k.iter().find(|k| k.label == label)
     assert_eq!(at(&k, "저역컷 100Hz"), Action::SwitchOn);
     assert_eq!(at(&k, "GAIN"), Action::Ok);
 }
+#[test] fn recovers_signature22_two_sweeps() {
+    // 좌표 하강은 (3150, 400)에 갇혀 HIGH +15, LOW +14를 내던 사례입니다.
+    let g = group(MixerModel::SoundcraftSignature22, 0);
+    let flat = ltass_db(Voice::Male);
+    let fin = std::array::from_fn(|b| {
+        let f = BANDS_HZ[b];
+        flat[b] + 6.0 * Shape::HighShelf(12_000.0).response(f) - 6.0 * Shape::Bell(1_000.0).response(f)
+            - 4.0 * Shape::Bell(200.0).response(f) + hpf_db(100.0, f)
+    });
+    let k = knob_positions(&g, &neutral_summary(flat, 10.0), &fin, 10.0);
+    assert!((5.0..=7.0).contains(&db_of(at(&k, "HIGH 12kHz"))), "{k:?}");
+    assert!(matches!(at(&k, "FREQ 1"), Action::SetFreq { hz } if [800.0, 1000.0, 1250.0].contains(&hz)), "{k:?}");
+    assert!((-7.0..=-5.0).contains(&db_of(at(&k, "MID 1"))), "{k:?}");
+    assert!(matches!(at(&k, "FREQ 2"), Action::SetFreq { hz } if [160.0, 200.0, 250.0].contains(&hz)), "{k:?}");
+    assert!((-5.0..=-3.0).contains(&db_of(at(&k, "MID 2"))), "{k:?}");
+    assert_eq!(at(&k, "LOW 60Hz"), Action::Ok);
+    assert_eq!(at(&k, "저역컷 100Hz"), Action::SwitchOn);
+}
 #[test] fn flat_saved_right_after_flat_analysis_is_all_ok() {
     let flat = ltass_db(Voice::Male);
     let k = knob_positions(&group(V3, 0), &neutral_summary(flat, 10.0), &flat, 10.0);
     assert!(k.iter().all(|k| k.action == Action::Ok), "{k:?}");
+    // 규칙 3의 진짜 가운데 요약은 조용할 수 있지만(엔진은 GAIN +20을 냄) 노브 위치의 GAIN은 늘 ✓입니다.
+    let quiet = Summary { peak_db: -35.0, ..neutral_summary(flat, 10.0) };
+    assert_eq!(at(&knob_positions(&group(V3, 0), &quiet, &flat, 10.0), "GAIN"), Action::Ok);
 }
 #[test] fn comp_from_dynamic_range() {
     let flat = ltass_db(Voice::Male);
@@ -718,5 +765,7 @@ fn at(k: &[Advice], label: &str) -> Action { k.iter().find(|k| k.label == label)
     assert!(knobs_differ(&freq(800.0), &freq(1250.0)));
     assert!(knobs_differ(&one("저역컷 100Hz", Action::SwitchOn), &one("", Action::Ok)));
     assert!(!knobs_differ(&one("COMP", Action::Rotate { degrees: 30.0, db: 0.0 }), &one("", Action::Ok)));
+    // 말소리 부족(모두 Wait)이면 비교할 추천이 없습니다.
+    assert!(!knobs_differ(&labels(&g), &mid(-6.0)));
 }
 }
