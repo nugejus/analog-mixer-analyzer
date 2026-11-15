@@ -103,13 +103,13 @@ struct Live {
 }
 
 impl Live {
-    fn new(input: Input) -> Self {
+    fn new(input: Input, per_oct: usize) -> Self {
         let sr = input.sample_rate;
         Self {
             levels: LevelMeter::new(sr, input.channels),
             spectrum: Spectrum::new(sr),
             feedback: FeedbackDetector::new(sr),
-            curve: DisplayCurve::new(spectrum::display_freqs(RESOLUTIONS[2].1).len()),
+            curve: DisplayCurve::new(spectrum::display_freqs(per_oct).len()),
             howl: None,
             rec: None,
             last_data: Instant::now(),
@@ -151,13 +151,13 @@ impl Live {
     }
 }
 
-fn open(device: &str) -> Result<Live, String> {
+fn open(device: &str, per_oct: usize) -> Result<Live, String> {
     if device == DEMO {
         Ok(audio::open_demo())
     } else {
         audio::open(Some(device))
     }
-    .map(Live::new)
+    .map(|l| Live::new(l, per_oct))
     .map_err(|e| format!("입력 장치를 열 수 없습니다: {e}"))
 }
 
@@ -190,7 +190,7 @@ impl App {
         let model = MixerModel::MackieProFx22v3;
         Self {
             devices: audio::device_names(),
-            live: open(&device),
+            live: open(&device, RESOLUTIONS[2].1),
             device,
             channel: 0,
             model,
@@ -251,7 +251,7 @@ impl App {
             self.devices = audio::device_names(); // pick up devices plugged in after launch
         }
         if pick != self.device {
-            self.live = open(&pick);
+            self.live = open(&pick, RESOLUTIONS[self.res].1);
             self.device = pick;
         }
         ui.label("분석채널");
@@ -724,12 +724,19 @@ mod tests {
 
     #[test]
     fn stalled_stream_reads_as_silent() {
-        let mut live = Live::new(audio::open_demo());
+        let mut live = Live::new(audio::open_demo(), 48);
         live.last_data = Instant::now() - Duration::from_secs(4);
         assert!(live.silent());
         std::thread::sleep(Duration::from_millis(100));
         live.pump(0, 1.0, 48);
         assert!(!live.silent());
+    }
+
+    #[test]
+    fn live_built_at_96_handles_its_frames() {
+        let mut live = Live::new(audio::open_demo(), 96);
+        std::thread::sleep(Duration::from_millis(600));
+        live.pump(0, 1.0, 96);
     }
 
     #[test]
