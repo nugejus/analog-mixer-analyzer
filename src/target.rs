@@ -144,6 +144,14 @@ pub fn tone_excess(measured: &[f32; 25], reference: &[f32; 25]) -> [f32; 8] {
     })
 }
 
+/// Level that lines the goal up with the measurement on the graph: the median of measured − goal
+/// over 100 Hz–12.5 kHz, so a few loud bands (what the graph should reveal) do not drag it up.
+pub fn level_match_db(measured: &[f32; 25], goal: &[f32; 25]) -> f32 {
+    let mut d: Vec<f32> = (2..=23).map(|i| measured[i] - goal[i]).collect();
+    d.sort_by(f32::total_cmp);
+    (d[10] + d[11]) / 2.0
+}
+
 /// Byrne 1994 LTASS, 1/3-octave dB.
 pub fn ltass_db(voice: Voice) -> [f32; 25] {
     match voice {
@@ -229,7 +237,18 @@ mod tests {
     }
 
     #[test]
-    fn tone_excess_follows_reference_level() {
+    fn level_match_ignores_a_few_loud_bands() {
+    let goal = [-40.0f32; 25];
+    let mut m = goal.map(|g| g + 5.0);
+    assert!((level_match_db(&m, &goal) - 5.0).abs() < 1e-4);
+    for v in &mut m[11..=18] {
+        *v += 8.0; // 800 Hz–4 kHz: 8 of the 22 matched bands
+    }
+    assert!((level_match_db(&m, &goal) - 5.0).abs() < 1e-4);
+}
+
+#[test]
+fn tone_excess_follows_reference_level() {
         let reference = [-40.0f32; 25];
         let mut m = reference;
         m[14..=16].iter_mut().for_each(|v| *v += 6.0); // 1600, 2000, 2500 = 까랑함

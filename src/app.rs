@@ -1128,7 +1128,7 @@ impl eframe::App for App {
         });
         egui::CentralPanel::default().show(ui, |ui| match &self.live {
             Ok(live) => {
-                let offset = advice.map_or(0.0, |a| a.level_offset_db);
+                let offset = summary.map_or(0.0, |s| mixer_analyzer::target::level_match_db(&s.bands_db, &self.goal.db));
                 let per_oct = RESOLUTIONS[self.res].1;
                 let target = self.analysis.as_ref().filter(|a| a.summary.is_some()).map(|a| {
                     let mut t = self.goal.db;
@@ -1152,9 +1152,9 @@ impl eframe::App for App {
                     ui.checkbox(&mut sh.tone, c("대역 비교", mocha::RED));
                     ui.checkbox(&mut sh.bumps, c("봉우리 표시", mocha::PEACH));
                 });
-                let tone = summary.zip(advice).map(|(s, a)| {
+                let tone = summary.map(|s| {
                     let mut reference = self.goal.db;
-                    reference.iter_mut().for_each(|v| *v += a.level_offset_db);
+                    reference.iter_mut().for_each(|v| *v += offset);
                     mixer_analyzer::target::tone_excess(&s.bands_db, &reference)
                 });
                 let bumps = match (&self.analysis, summary) {
