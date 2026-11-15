@@ -1556,6 +1556,10 @@ mod tests {
         match knob(&s, "HIGH 12kHz") { Action::Ok => {}, Action::Rotate { db, .. } => assert!(db <= 4.0, "{db}"), x => panic!("{x:?}") }
         assert!(s.notes.iter().any(|n| n == "이 채널에는 300Hz 부근을 바꿀 노브가 없어 그 부분은 빼고 맞춥니다."));
     }
+    #[test] fn preset_low_cut_without_switch_is_a_note() {
+        let g = &MixerFactory::create(MixerModel::SoundcraftEpm).groups[0];
+        assert_eq!(preset_goal(3, Voice::Male, g).notes, ["이 채널에는 100Hz 부근을 바꿀 노브가 없어 그 부분은 빼고 맞춥니다."]);
+    }
     #[test] fn every_preset_on_every_group_is_finite() {
         for m in MixerModel::ALL { for g in &MixerFactory::create(m).groups { for i in 0..PRESETS.len() {
             for k in advise(&natural(|_| 0.0), g, &preset_goal(i, Voice::Female, g)).knobs {
