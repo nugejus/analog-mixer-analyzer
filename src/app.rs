@@ -250,6 +250,7 @@ fn advise(a: &Analysis, group: &ChannelGroup, goal: &Goal) -> AdviceSet {
             feedback_hz: a.howl,
             silent: a.silent,
             restore_dynamic_range_db: goal.restore_dr,
+            current: None,
         },
     );
     s.notes.extend(goal.notes.iter().cloned());
