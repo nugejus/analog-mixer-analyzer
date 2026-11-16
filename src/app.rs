@@ -333,6 +333,16 @@ fn prefill(view: &KnobView, group: &ChannelGroup) -> Positions {
     if advice::fits(group, &p) { p } else { centre }
 }
 
+/// 분석 `a`에 맞는 (입력 칸, 지닌 미리 채움). 쓸 수 없는 그대로 분석은 노브 줄이 이유 노트뿐이라 미리 채움이
+/// 가운데로 돌아가므로, 채움을 지녀 두었다가 다시 분석할 때 씁니다.
+fn entry_after(a: &Analysis, fill: Positions) -> (Option<Positions>, Option<Positions>) {
+    match (a.flat, usable(a)) {
+        (true, _) => (None, None),
+        (false, true) => (Some(fill), None),
+        (false, false) => (None, Some(fill)),
+    }
+}
+
 /// 노브 줄 머리글 아래의 `저장된 노브: …`(가운데가 아닌 노브만, FREQ는 그 MID가 0이 아닐 때만).
 fn saved_line(saved: Option<&Saved>, mixer: &str, group: &ChannelGroup) -> Option<String> {
     let p = stored(saved, mixer, group)?;
@@ -489,6 +499,8 @@ pub struct App {
     analysis: Option<Analysis>,
     /// 열려 있는 노브 위치 입력 칸(늘 지금 그룹의 라벨).
     editing: Option<Positions>,
+    /// 쓸 수 없는 그대로 분석이 지닌 미리 채움(다음 분석에 씀, 늘 지금 그룹의 라벨).
+    kept: Option<Positions>,
     /// Rebuilt by `readvise`.
     view: KnobView,
     /// 과부하 의심; rebuilt by `readvise`.
@@ -562,6 +574,7 @@ impl App {
             freq_smooth: 3,
             analysis: None,
             editing: None,
+            kept: None,
             view: KnobView::None,
             overload: false,
             show: Show::default(),
@@ -589,13 +602,13 @@ impl App {
     }
 
     /// 믹서·그룹을 바꾸면 입력한 위치는 버리고, 쓸 수 있는 그대로 분석이면 그 그룹의 미리 채움(같은 믹서·그룹의
-    /// 저장된 위치, 없으면 가운데)으로 입력 칸을 다시 엽니다.
+    /// 저장된 위치, 없으면 가운데)으로 입력 칸을 다시 엽니다(쓸 수 없으면 그 채움을 지님).
     fn regroup(&mut self) {
         let group = &self.profile.groups[self.group];
         let fill = stored(self.picked(), &mixer_name(&self.profile), group).cloned().unwrap_or_else(|| advice::centre(group));
         if let Some(a) = self.analysis.as_mut().filter(|a| !a.flat) {
             a.entered = None;
-            self.editing = usable(a).then_some(fill);
+            (self.editing, self.kept) = entry_after(a, fill);
         }
         self.readvise();
     }
@@ -1347,8 +1360,14 @@ fn knob_row(ui: &mut egui::Ui, knobs: &[Advice], from: Option<&Positions>) {
     });
 }
 
-/// 노브 위치 입력 칸(그룹 순서, `p`는 그 그룹의 라벨). [확인]을 누르면 참.
-fn entry_row(ui: &mut egui::Ui, group: &ChannelGroup, p: &mut Positions) -> bool {
+/// 돌린 MID(≠ 0)의 FREQ가 모름(0)이면 참(`Positions`에서 FREQ 바로 뒤가 그 MID). 엔진이 다른 주파수로 계산해
+/// 맞게 둔 FREQ를 옮기라고 하므로 [확인]을 막습니다.
+fn freq_missing(p: &Positions) -> bool {
+    p.windows(2).any(|w| w[0].0.starts_with("FREQ") && w[0].1 == 0.0 && w[1].1 != 0.0)
+}
+
+/// 노브 위치 입력 칸(그룹 순서, `p`는 그 그룹의 라벨). [확인]은 머리글 줄에 있습니다(8노브 줄은 좁은 창을 넘음).
+fn entry_row(ui: &mut egui::Ui, group: &ChannelGroup, p: &mut Positions) {
     let mut values = p.iter_mut().map(|e| &mut e.1);
     let dim = |ui: &mut egui::Ui, t: &str| ui.colored_label(mocha::SUBTEXT0, t);
     ui.horizontal_top(|ui| {
@@ -1367,8 +1386,10 @@ fn entry_row(ui: &mut egui::Ui, group: &ChannelGroup, p: &mut Positions) -> bool
                         *v = if on { 1.0 } else { 0.0 };
                     }
                     Control::Comp => {
-                        ui.add(egui::DragValue::new(v).range(0.0..=300.0).suffix("°"));
-                        *v = (*v / 5.0).round() * 5.0;
+                        // 치는 동안 맞추면 "3"이 5가 되어 30이 50이 됩니다: 칸을 벗어날 때 5° 단위로.
+                        if !ui.add(egui::DragValue::new(v).range(0.0..=300.0).suffix("°")).has_focus() {
+                            *v = (*v / 5.0).round() * 5.0;
+                        }
                         dim(ui, "왼쪽 끝에서");
                     }
                     c if k.label.starts_with("FREQ") => {
@@ -1389,9 +1410,7 @@ fn entry_row(ui: &mut egui::Ui, group: &ChannelGroup, p: &mut Positions) -> bool
                 }
             });
         }
-        ui.button("확인").clicked()
-    })
-    .inner
+    });
 }
 
 impl eframe::App for App {
@@ -1417,9 +1436,10 @@ impl eframe::App for App {
             })
         });
         if let Some(a) = finished {
-            // 미리 채움은 분석 직전 노브 줄이 보여 주던 위치입니다(열려 있던 입력 칸이면 그 값).
-            let fill = self.editing.take().unwrap_or_else(|| prefill(&self.view, &self.profile.groups[self.group]));
-            self.editing = (!a.flat && usable(&a)).then_some(fill);
+            // 미리 채움은 분석 직전 노브 줄이 보여 주던 위치입니다(열려 있던 입력 칸이나 지닌 채움이면 그 값).
+            let g = &self.profile.groups[self.group];
+            let fill = self.editing.take().or(self.kept.take()).unwrap_or_else(|| prefill(&self.view, g));
+            (self.editing, self.kept) = entry_after(&a, fill);
             self.analysis = Some(a);
             self.readvise();
         }
@@ -1460,12 +1480,16 @@ impl eframe::App for App {
                         ui.label(h);
                     }
                     reopen = matches!(self.view, KnobView::Advice(_, Some(_))) && ui.button("입력 고치기").clicked();
+                    if let Some(p) = &self.editing {
+                        let b = ui.add_enabled(!freq_missing(p), egui::Button::new("확인"));
+                        confirm = b.on_disabled_hover_text("FREQ 눈금을 고르세요.").clicked();
+                    }
                 });
                 if let Some(l) = &saved_knobs {
                     ui.label(l);
                 }
                 match (&mut self.editing, knobs) {
-                    (Some(p), _) => confirm = entry_row(ui, &self.profile.groups[self.group], p),
+                    (Some(p), _) => entry_row(ui, &self.profile.groups[self.group], p),
                     (None, Some(k)) => knob_row(ui, k, from),
                     (None, None) => {}
                 }
@@ -1539,7 +1563,8 @@ impl eframe::App for App {
             self.readvise();
         }
         if reopen {
-            self.editing = self.analysis.as_ref().and_then(|a| a.entered.clone());
+            // 다시 [확인]하기 전에는 입력한 위치가 없습니다(저장도 막힘).
+            self.editing = self.analysis.as_mut().and_then(|a| a.entered.take());
             self.readvise();
         }
         ui.ctx().request_repaint();
@@ -2022,6 +2047,47 @@ mod tests {
         let entered = Analysis { entered: Some(k.clone()), ..as_is(natural(|_| 0.0)) };
         assert_eq!(current(&entered, g), Some(k));
         assert_eq!(current(&entered, &p.groups[1]), None);
+    }
+    #[test] fn failed_as_is_keeps_the_fill() {
+        let (p, m, _) = knob_setup();
+        let g = &p.groups[0];
+        let goal = preset_goal(0, Voice::Male, g);
+        let dull = natural(|f| -6.0 * advice::Shape::HighShelf(12_000.0).response(f));
+        let fill = prefill(&knob_view(Some(&dull), false, None, &m, g, &goal), g);
+        assert_ne!(fill, advice::centre(g));
+        // 말소리 부족: 노브 줄은 이유 노트라 그 미리 채움은 가운데지만, 지닌 채움으로 다시 분석합니다.
+        let short = as_is(Analysis { summary: None, ..natural(|_| 0.0) });
+        let v = knob_view(Some(&short), false, None, &m, g, &goal);
+        assert_eq!(prefill(&v, g), advice::centre(g));
+        assert_eq!(entry_after(&short, fill.clone()), (None, Some(fill.clone())));
+        assert_eq!(entry_after(&as_is(natural(|_| 0.0)), fill.clone()), (Some(fill.clone()), None));
+        assert_eq!(entry_after(&natural(|_| 0.0), fill), (None, None));
+    }
+    #[test] fn turned_mid_needs_its_freq() {
+        let g = &MixerFactory::create(MixerModel::MackieProFx22v3).groups[0];
+        assert!(freq_missing(&pos(g, &[("MID", -6.0)])));
+        assert!(!freq_missing(&pos(g, &[("FREQ", 2_500.0), ("MID", -6.0)])));
+        assert!(!freq_missing(&pos(g, &[("FREQ", 2_500.0)])));
+        assert!(!freq_missing(&advice::centre(g)));
+    }
+    #[test] fn typing_a_comp_angle() {
+        let g = ChannelGroup { label: "t", controls: vec![Control::Comp] };
+        let key = |key| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
+        let typed = |text: &[&str]| {
+            let mut p = advice::centre(&g);
+            let ctx = egui::Context::default();
+            let mut frames = vec![vec![], vec![key(egui::Key::Tab)]];
+            frames.extend(text.iter().map(|t| vec![egui::Event::Text((*t).into())]));
+            frames.extend([vec![key(egui::Key::Enter)], vec![]]);
+            for events in frames {
+                ctx.run_ui(egui::RawInput { events, ..Default::default() }, |ui| entry_row(ui, &g, &mut p)).textures_delta.clear();
+            }
+            p[0].1
+        };
+        // 한 글자씩 쳐도 그 수가 되고, 칸을 벗어나면 5° 단위.
+        assert_eq!(typed(&["3", "0"]), 30.0);
+        assert_eq!(typed(&["1", "2", "0"]), 120.0);
+        assert_eq!(typed(&["3", "2"]), 30.0);
     }
     #[test] fn overload_dot_follows_the_analysis() {
         let (p, m, _) = knob_setup();
