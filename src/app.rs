@@ -8,7 +8,7 @@ use mixer_analyzer::{
     feedback::FeedbackDetector,
     levels::{HistPoint, LevelMeter},
     mixers::{ChannelGroup, Control, KNOB_TRAVEL_DEG, MixerFactory, MixerModel, MixerProfile},
-    saved::{self, Flat, Saved},
+    saved::{self, Saved},
     spectrum::{self, DisplayCurve, Frame, HOP, Spectrum},
     speech::{SpeechStats, Summary},
     target::{BANDS_HZ, BELL_OCT, PRESETS, Voice, preset_target},
@@ -274,7 +274,6 @@ impl LastFlat {
 const DIFFERS: &str = "오늘 소리 기준 추천이 저장된 노브 위치와 다릅니다(마이크·목소리·자리가 바뀌었을 수 있음). 오늘 소리 기준인 지금 추천을 따르세요.";
 const NEED_FLAT: &str = "가운데에서 분석하면 노브 추천이 나옵니다. 그다음 세팅을 바꾸고 '지금 세팅 그대로 분석'을 누르면 지금 노브 위치를 추정합니다.";
 const UNSURE: &str = "가운데 분석과 소리 차이가 너무 커서(노브 하나가 끝까지 돌아간 것으로 나옴) 지금 노브 위치를 추정하지 않았습니다. 말하는 사람이나 마이크가 바뀌었다면 가운데 분석부터 다시 하세요(두 분석은 같은 사람·같은 마이크로). 이대로 저장하면 소리만 쓰입니다.";
-const NO_FLAT_SAVED: &str = "가운데 분석이 없어 노브 위치는 저장하지 않았습니다(소리만 저장).";
 
 /// 노브 줄에 보일 것(spec 규칙 1–5).
 enum KnobView {
@@ -290,7 +289,7 @@ enum KnobView {
     None,
 }
 
-/// 규칙 1–5. 2와 3의 GAIN은 ✓이고 엔진 노트는 버립니다(`knob_positions`).
+/// 규칙 1–5. 2와 3의 GAIN은 ✓이고 엔진 노트는 버립니다(`as_advice`, `knob_positions`).
 fn knob_view(
     analysis: Option<&Analysis>,
     saved: Option<&Saved>,
@@ -299,11 +298,11 @@ fn knob_view(
     group: &ChannelGroup,
     goal: &Goal,
 ) -> KnobView {
-    let stored = saved.filter(|s| s.mixer == mixer && s.group == group.label).and_then(|s| {
-        let f = s.flat.as_ref()?;
-        let flat = advice::neutral_summary(f.bands_db, f.dynamic_range_db);
-        advice::knob_positions(group, &flat, &s.bands_db, s.dynamic_range_db)
-    });
+    let stored = saved
+        .filter(|s| s.mixer == mixer && s.group == group.label)
+        .and_then(|s| s.knobs.as_ref())
+        .filter(|k| advice::fits(group, k))
+        .map(|k| advice::as_advice(group, k));
     let Some(a) = analysis else {
         return stored.map_or(KnobView::None, KnobView::Stored);
     };
@@ -339,16 +338,6 @@ fn header(v: &KnobView) -> Option<&'static str> {
         KnobView::Estimate(_) => Some("지금 노브 추정: 가운데(12시)에서 돌린 양"),
         KnobView::Names(_) | KnobView::None => None,
     }
-}
-
-/// 이 소리와 함께 저장할 가운데 소리: 가운데 분석이면 자신, 그대로 분석이면 같은 채널·샘플레이트의 last_flat.
-fn flat_for_save(a: &Analysis, last_flat: Option<&LastFlat>, mixer: &str, group: &str) -> Option<Flat> {
-    let s = if a.flat {
-        a.summary.as_ref()?
-    } else {
-        &last_flat.filter(|l| l.fits(mixer, group, a.sample_rate))?.summary
-    };
-    Some(Flat { dynamic_range_db: s.dynamic_range_db, bands_db: s.bands_db })
 }
 
 /// An open input and the analysis state built for its sample rate and channel count.
@@ -678,10 +667,8 @@ impl App {
         if ui.button("취소").clicked() {
             self.naming = None;
         }
-        if let (true, Some(a), Some(s)) = (save, analysis, summary) {
+        if let (true, Some(s)) = (save, summary) {
             let (mixer, group) = (mixer_name(&self.profile), self.profile.groups[self.group].label);
-            let flat = flat_for_save(a, self.last_flat.as_ref(), &mixer, group);
-            let no_flat = flat.is_none();
             let s = Saved {
                 name,
                 mixer,
@@ -689,13 +676,10 @@ impl App {
                 dynamic_range_db: s.dynamic_range_db,
                 bands_db: s.bands_db,
                 sample_rate: self.analysis.as_ref().map(|a| a.sample_rate.round() as u32),
-                flat,
+                knobs: None,
             };
             saved::upsert(&mut self.saved, s);
             self.persist();
-            if no_flat && self.save_error.is_none() {
-                self.save_error = Some(NO_FLAT_SAVED.into());
-            }
             self.naming = None;
             self.readvise();
         }
@@ -1721,7 +1705,7 @@ mod tests {
     }
 
     #[test] fn saved_goal_flags_other_channel() {
-        let s = Saved { name: "x".into(), mixer: "Mackie ProFX22v3 (2019, LEVEL SET LED)".into(), group: "CH1-12 (COMP)".into(), dynamic_range_db: 9.0, bands_db: [0.0; 25], sample_rate: Some(48_000), flat: None };
+        let s = Saved { name: "x".into(), mixer: "Mackie ProFX22v3 (2019, LEVEL SET LED)".into(), group: "CH1-12 (COMP)".into(), dynamic_range_db: 9.0, bands_db: [0.0; 25], sample_rate: Some(48_000), knobs: None };
         let same = saved_goal(&s, &s.mixer, &s.group, Some(48_000.0));
         assert!(same.notes.is_empty() && same.restore_dr == Some(9.0) && same.db == s.bands_db);
         let other = saved_goal(&s, &s.mixer, "CH13-14", Some(48_000.0));
@@ -1745,13 +1729,13 @@ mod tests {
         let g = &MixerFactory::create(MixerModel::MackieProFx22v3).groups[0];
         let saved_now = natural(|f| hpf_db(100.0, f)); // 저장 때: 스위치 켜짐
         let s = Saved { name: "x".into(), mixer: "m".into(), group: g.label.into(),
-                        dynamic_range_db: 10.0, bands_db: saved_now.summary.as_ref().unwrap().bands_db, sample_rate: Some(48_000), flat: None };
+                        dynamic_range_db: 10.0, bands_db: saved_now.summary.as_ref().unwrap().bands_db, sample_rate: Some(48_000), knobs: None };
         let a = advise(&natural(|_| 0.0), g, &saved_goal(&s, "m", g.label, Some(48_000.0))); // 지금: 꺼짐(가운데에서 시작)
         assert_eq!(knob(&a, "저역컷 100Hz"), Action::SwitchOn);
     }
 
     fn saved_sample(name: &str) -> Saved {
-        Saved { name: name.into(), mixer: "m".into(), group: "g".into(), dynamic_range_db: 9.0, bands_db: [0.0; 25], sample_rate: Some(48_000), flat: None }
+        Saved { name: name.into(), mixer: "m".into(), group: "g".into(), dynamic_range_db: 9.0, bands_db: [0.0; 25], sample_rate: Some(48_000), knobs: None }
     }
     #[test] fn repick_follows_name() {
         let (a, b, c) = (saved_sample("a"), saved_sample("b"), saved_sample("c"));
@@ -1793,10 +1777,10 @@ mod tests {
     fn knob_setup() -> (MixerProfile, String, Saved) {
         let p = MixerFactory::create(MixerModel::MackieProFx22v3);
         let m = mixer_name(&p);
-        let flat = natural(|_| 0.0).summary.unwrap();
         let done = natural(|f| hpf_db(100.0, f)).summary.unwrap();
+        let knobs = advice::centre(&p.groups[0]).into_iter().map(|(l, v)| if l.starts_with("저역컷") { (l, 1.0) } else { (l, v) }).collect();
         let s = Saved { mixer: m.clone(), group: p.groups[0].label.into(), dynamic_range_db: done.dynamic_range_db, bands_db: done.bands_db,
-                        flat: Some(Flat { dynamic_range_db: flat.dynamic_range_db, bands_db: flat.bands_db }), ..saved_sample("x") };
+                        knobs: Some(knobs), ..saved_sample("x") };
         (p, m, s)
     }
     #[test] fn knob_view_rules() {
@@ -1808,7 +1792,7 @@ mod tests {
         };
         let (flat, done) = (natural(|_| 0.0), as_is(natural(|f| hpf_db(100.0, f))));
         let lf = last_flat(&m, g.label, &flat);
-        let old = Saved { flat: None, ..s.clone() };
+        let old = Saved { knobs: None, ..s.clone() };
         let names = "가운데에서 분석하면 노브 추천이 나옵니다. 그다음 세팅을 바꾸고 '지금 세팅 그대로 분석'을 누르면 지금 노브 위치를 추정합니다.";
         // 1: 가운데 분석은 저장된 노브 위치가 있어도 오늘 소리 기준 추천.
         let v = view(Some(&flat), Some(&s), Some(&lf));
@@ -1823,6 +1807,8 @@ mod tests {
         }
         let other_mixer = Saved { mixer: "Mackie ProFX22 (1세대, 2011)".into(), ..s.clone() };
         assert!(matches!(view(None, Some(&other_mixer), None), KnobView::None));
+        let unfit = Saved { knobs: Some(vec![("HIGH 12kHz".into(), 6.0)]), ..s.clone() }; // 라벨이 그룹과 맞지 않음: 소리만
+        assert!(matches!(view(None, Some(&unfit), None), KnobView::None));
         assert!(matches!(view(Some(&done), Some(&other_mixer), Some(&lf)), KnobView::Estimate(_)));
         // 3: 그대로 분석 + 같은 믹서·그룹·샘플레이트의 last_flat이면 지금 노브 추정. 옛 저장(노브 위치 없음)도 여기로.
         for saved in [None, Some(&old)] {
@@ -1901,18 +1887,6 @@ mod tests {
         // 다른 그룹에서 저장했거나 노브 위치가 없으면 비교하지 않습니다.
         let other = Saved { group: p.groups[1].label.into(), ..s.clone() };
         assert!(!notes(&darker(), &other).iter().any(|n| n == note));
-        assert!(notes(&darker(), &Saved { flat: None, ..s }).is_empty());
-    }
-    #[test] fn flat_for_save_cases() {
-        let (m, g) = ("m", "g");
-        let flat = natural(|_| 0.0);
-        let lf = last_flat(m, g, &natural(|_| 3.0));
-        let of = |s: &Summary| Some(Flat { dynamic_range_db: s.dynamic_range_db, bands_db: s.bands_db });
-        assert_eq!(flat_for_save(&flat, Some(&lf), m, g), of(flat.summary.as_ref().unwrap()));
-        let done = as_is(natural(|f| hpf_db(100.0, f)));
-        assert_eq!(flat_for_save(&done, Some(&lf), m, g), of(&lf.summary));
-        assert_eq!(flat_for_save(&done, Some(&lf), m, "other"), None);
-        assert_eq!(flat_for_save(&done, None, m, g), None);
-        assert_eq!(flat_for_save(&Analysis { sample_rate: 44_100.0, ..done }, Some(&lf), m, g), None);
+        assert!(notes(&darker(), &Saved { knobs: None, ..s }).is_empty());
     }
 }
