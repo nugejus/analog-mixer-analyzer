@@ -267,7 +267,8 @@ fn advise(a: &Analysis, group: &ChannelGroup, goal: &Goal) -> AdviceSet {
             feedback_hz: a.howl,
             silent: a.silent,
             restore_dynamic_range_db: goal.restore_dr,
-            current: current(a, group).as_ref(),
+            // 가운데 분석은 `None`: 결과는 가운데와 같고, 입력한 위치의 잡음 ✓ 범위는 쓰지 않습니다.
+            current: a.entered.as_ref().filter(|_| !a.flat),
         },
     );
     s.notes.extend(goal.notes.iter().cloned());
