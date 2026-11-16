@@ -14,12 +14,15 @@ const LOW_BOOST_MAX_DB: f32 = 3.0;
 const HIGH_BOOST_MAX_DB: f32 = 6.0;
 const OK_BELOW_DB: f32 = 1.5;
 const OK_RELEASE_DB: f32 = 2.5;
-/// 입력한 위치의 ✓ 범위: 노브마다 max(OK_RELEASE_DB, NOISE_Z·σ). σ는 차이 d에 대역마다 독립인 TAKE_NOISE_DB 잡음이
-/// 있을 때 그 노브 게인의 표준편차입니다.
+/// 입력한 위치로 복구할 때의 ✓ 범위: 노브마다 max(OK_RELEASE_DB, NOISE_Z·σ). σ는 차이 d에 대역마다 독립인 TAKE_NOISE_DB
+/// 잡음이 있을 때 그 노브 게인의 표준편차입니다.
 /// ponytail: 실측 녹음이 아니라 균일 ±1 dB 잡음 시뮬레이션으로 고른 값(저장·오늘 두 녹음의 차이라 √(2/3) dB, Z는 같은
-/// 소리를 다시 녹음했을 때 ✓ 아닌 노브가 나오는 비율이 그룹 종류마다 5% 이하인 가장 작은 값). 실측 녹음이 모이면 다시 고르세요.
+/// 소리를 다시 녹음했을 때 ✓ 아닌 노브가 나오는 비율이 그룹 종류마다(두 스윕 제외) 5% 안팎인 가장 작은 값, K·FREQ에 따라
+/// 더 높기도 함). 실측 녹음이 모이면 다시 고르세요. 녹음마다 다르게 하려면 맞춤의 가중 잔차(`fit_eq_in`의 셋째 값)로 잴 수 있습니다.
 const TAKE_NOISE_DB: f32 = 0.8;
 const NOISE_Z: f32 = 2.75;
+/// 자유도(EQ 노브 수)별 χ² 99.9% 값: 돌릴 양 전체의 d²가 이보다 크면 잡음이 아닙니다.
+const CHI2_999: [f32; 5] = [0.0, 10.83, 13.82, 16.27, 18.47];
 pub const NO_INPUT: &str = "입력 신호가 없습니다. 케이블과 입력장치를 확인하세요. macOS에서는 시스템 설정 > 개인정보 보호 및 보안 > 마이크에서 이 앱을 허용하세요.";
 const KEEP_TALKING: &str = "말소리가 부족합니다. [분석]을 다시 누르고 녹음이 끝날 때까지 평소처럼 말씀해 주세요.";
 pub const OVERLOAD: &str = "과부하 의심: 아날로그 단에서 눌리거나 COMP가 과한 경우입니다.";
@@ -72,7 +75,20 @@ fn fit_eq_in(deviation: &[f32; 25], shapes: &[Shape], bands: std::ops::RangeIncl
     for (i, mi) in m.iter_mut().enumerate().skip(1) {
         mi[i] += lambda;
     }
-    // 대칭 양정치(Σw > 0, λ > 0)라 피벗 없이 가우스 소거해도 됩니다.
+    let mut x = solve(m);
+    let resid = bands
+        .map(|b| {
+            let fit: f32 = row(b).iter().zip(&x).map(|(a, x)| a * x).sum();
+            weight(b) * (-deviation[b] - fit).powi(2)
+        })
+        .sum();
+    let c = x.remove(0);
+    (x, c, resid)
+}
+
+/// 확대 행렬 [M | y]에서 x = M⁻¹y. M이 대칭 양정치(맞춤은 Σw > 0, λ > 0)라 피벗 없이 가우스 소거해도 됩니다.
+fn solve(mut m: Vec<Vec<f32>>) -> Vec<f32> {
+    let n = m.len();
     for k in 0..n {
         let (top, bot) = m.split_at_mut(k + 1);
         let p = &top[k];
@@ -88,28 +104,24 @@ fn fit_eq_in(deviation: &[f32; 25], shapes: &[Shape], bands: std::ops::RangeIncl
         let s: f32 = (i + 1..n).map(|j| m[i][j] * x[j]).sum();
         x[i] = (m[i][n] - s) / m[i][i];
     }
-    let resid = bands
-        .map(|b| {
-            let fit: f32 = row(b).iter().zip(&x).map(|(a, x)| a * x).sum();
-            weight(b) * (-deviation[b] - fit).powi(2)
-        })
-        .sum();
-    let c = x.remove(0);
-    (x, c, resid)
+    x
 }
 
-/// 대역마다 독립인 1 dB 잡음에서 맞춘 게인의 표준편차: √diag(M⁻¹AᵀW²AM⁻¹), M = AᵀWA + λD.
-/// 맞춤이 d에 선형이라 대역마다 1 dB 하나만 넣은 맞춤의 게인 제곱을 더하면 됩니다.
-fn gain_sd(shapes: &[Shape]) -> Vec<f32> {
-    let mut var = vec![0.0; shapes.len()];
+/// 대역마다 독립인 1 dB 잡음에서 맞춘 게인의 공분산: M⁻¹AᵀW²AM⁻¹, M = AᵀWA + λD.
+/// 맞춤이 d에 선형이라 대역마다 1 dB 하나만 넣은 맞춤의 게인끼리 곱해 더하면 됩니다.
+fn gain_cov(shapes: &[Shape]) -> Vec<Vec<f32>> {
+    let mut cov = vec![vec![0.0; shapes.len()]; shapes.len()];
     for b in FIT_BANDS {
         let mut e = [0.0; 25];
         e[b] = 1.0;
-        for (v, g) in var.iter_mut().zip(fit_eq_in(&e, shapes, FIT_BANDS, LAMBDA).0) {
-            *v += g * g;
+        let g = fit_eq_in(&e, shapes, FIT_BANDS, LAMBDA).0;
+        for (ci, gi) in cov.iter_mut().zip(&g) {
+            for (cij, gj) in ci.iter_mut().zip(&g) {
+                *cij += gi * gj;
+            }
         }
     }
-    var.into_iter().map(f32::sqrt).collect()
+    cov
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -459,10 +471,16 @@ impl AdviceEngine {
         let sh = shapes(&hz);
         let (turn, c, _) = fit(&d, &sh, FIT_BANDS, LAMBDA);
         let gains: Vec<f32> = turn.iter().zip(&eq).map(|(g, &i)| g + k[i].0).collect();
-        // 입력한 위치에서는 녹음마다 생기는 차이를 쫓지 않습니다: 60·80 Hz LOW와 12 kHz HIGH는 맞춤 대역 몇 개에만
-        // 걸려 대역 잡음이 큰 게인 차이가 되므로 ✓ 범위를 그 노브의 잡음 크기까지 넓힙니다(가운데 분석은 그대로).
-        let release: Vec<f32> = if inp.current.is_some_and(|p| fits(group, p)) {
-            gain_sd(&sh).iter().map(|s| OK_RELEASE_DB.max(NOISE_Z * TAKE_NOISE_DB * s)).collect()
+        // 입력한 위치로 복구할 때는 녹음마다 생기는 차이를 쫓지 않습니다: 60·80 Hz LOW와 12 kHz HIGH는 맞춤 대역 몇 개에만
+        // 걸려 대역 잡음이 큰 게인 차이가 되므로 ✓ 범위를 그 노브의 잡음 크기까지 넓힙니다(가운데 분석과 보통 모드는 그대로).
+        // 다만 돌릴 양 전체가 잡음 밖이면(d²) 소리가 바뀐 것이라 넓히지 않습니다: FREQ가 LOW·HIGH와 겹치면 둘의 몫만
+        // 불확실해 노브마다의 범위는 10 dB까지 넓지만, 합친 차이는 잡음과 구별됩니다.
+        let release: Vec<f32> = if restore.is_some() && inp.current.is_some_and(|p| fits(group, p)) {
+            let cov = gain_cov(&sh);
+            let aug = cov.iter().zip(&turn).map(|(r, &t)| r.iter().copied().chain([t]).collect()).collect();
+            let d2: f32 = turn.iter().zip(solve(aug)).map(|(t, x)| t * x).sum::<f32>() / TAKE_NOISE_DB.powi(2);
+            let changed = d2 > CHI2_999[eq.len()];
+            (0..eq.len()).map(|i| if changed { OK_RELEASE_DB } else { OK_RELEASE_DB.max(NOISE_Z * TAKE_NOISE_DB * cov[i][i].sqrt()) }).collect()
         } else {
             vec![OK_RELEASE_DB; eq.len()]
         };
@@ -852,7 +870,6 @@ fn plus(a: [f32; 25], b: [f32; 25]) -> [f32; 25] { std::array::from_fn(|i| a[i] 
     let set = model(&g, &pos(&g, &[("HIGH 12kHz", 5.0), ("MID 2.5kHz", -7.0), ("LOW 80Hz", 3.0)]));
     let raw = sum_of(std::array::from_fn(|b| summary(|_| 0.0).bands_db[b] - set[b]));
     let c = run_t(&g, &raw, t, None);
-    // LOW는 3 dB만 돌리면 잡음 ✓ 범위(80 Hz 셸빙 약 5 dB) 안이라 K를 -3으로 둡니다.
     let k = pos(&g, &[("HIGH 12kHz", -2.0), ("MID 2.5kHz", 2.0), ("LOW 80Hz", -3.0)]);
     let a = run_k(&g, &sum_of(plus(raw.bands_db, model(&g, &k))), t, None, Some(&k));
     for (l, kv) in [("HIGH 12kHz", -2.0), ("MID 2.5kHz", 2.0), ("LOW 80Hz", -3.0)] {
@@ -865,6 +882,14 @@ fn plus(a: [f32; 25], b: [f32; 25]) -> [f32; 25] { std::array::from_fn(|i| a[i] 
             x => panic!("{l}: {x:?}"),
         }
     }
+}
+#[test] fn normal_mode_entered_keeps_the_fixed_ok_range() {
+    // 잡음 ✓ 범위는 복구(저장·오늘 두 녹음의 차이)에만 씁니다. 보통 모드는 가운데 K를 입력해도 가운데 분석과 같습니다.
+    let (g, t) = (group(FX12, 0), ltass_db(Voice::Male));
+    let s = summary(|f| 4.0 * Shape::LowShelf(80.0).response(f));
+    let c = act(&run_t(&g, &s, t, None), "LOW 80Hz");
+    assert!(matches!(c, Action::Rotate { .. }), "{c:?}");
+    assert_eq!(act(&run_k(&g, &s, t, None, Some(&centre(&g))), "LOW 80Hz"), c);
 }
 const V3_LABEL: [(&str, f32); 5] = [("저역컷 100Hz", 1.0), ("HIGH 12kHz", 6.0), ("FREQ", 800.0), ("MID", -6.0), ("LOW 80Hz", -3.0)];
 /// 라벨 k대로 맞추고 다시 녹음: 오늘 소리 = 저장한 소리(가운데 소리 + k) + today, 복구 모드, K = k.
@@ -900,6 +925,10 @@ fn retake(g: &ChannelGroup, k: &Positions, today: impl Fn(f32) -> f32) -> Advice
     let a = retake(&g, &pos(&g, &V3_LABEL), |f| -6.0 * Shape::LowShelf(80.0).response(f));
     assert!(matches!(act(&a, "LOW 80Hz"), Action::Rotate { degrees, .. } if degrees > 0.0), "{:?}", a.knobs);
     for l in ["HIGH 12kHz", "FREQ", "MID", "저역컷 100Hz"] { assert_eq!(act(&a, l), Action::Ok, "{l}: {:?}", a.knobs); }
+    // FREQ 125 Hz MID와 겹친 LOW는 노브의 잡음 ✓ 범위가 10 dB 남짓이지만, 9 dB 붐은 돌릴 양 전체(d²)가 잡음 밖입니다.
+    let k = pos(&g, &[("저역컷 100Hz", 1.0), ("FREQ", 125.0), ("MID", -6.0), ("LOW 80Hz", -3.0)]);
+    let a = retake(&g, &k, |f| 9.0 * Shape::LowShelf(80.0).response(f));
+    assert!(matches!(act(&a, "LOW 80Hz"), Action::Rotate { degrees, .. } if degrees < 0.0), "{:?}", a.knobs);
 }
 #[test] fn freq_only_move() {
     let g = group(V3, 0);

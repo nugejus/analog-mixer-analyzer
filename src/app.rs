@@ -2039,6 +2039,17 @@ mod tests {
         assert_eq!(line(full, "Mackie ProFX22 (1세대, 2011)"), None);
         assert_eq!(saved_line(None, &m, g), None);
     }
+    #[test] fn centre_analysis_keeps_the_fixed_ok_range() {
+        // 가운데 분석은 `current: None`이라 복구에서도 ✓ 범위가 2.5 dB입니다. 가운데 위치를 넘기면 80 Hz LOW의
+        // 잡음 ✓ 범위(약 5 dB)라 4 dB 붐이 ✓가 됩니다.
+        let p = MixerFactory::create(MixerModel::MackieProFx12v3);
+        let (m, g) = (mixer_name(&p), &p.groups[0]);
+        let done = natural(|_| 0.0).summary.unwrap();
+        let s = Saved { mixer: m.clone(), group: g.label.into(), dynamic_range_db: done.dynamic_range_db, bands_db: done.bands_db,
+                        knobs: Some(advice::centre(g)), ..saved_sample("x") };
+        let a = advise(&natural(|f| 4.0 * advice::Shape::LowShelf(80.0).response(f)), g, &saved_goal(&s, &m, g.label, Some(48_000.0)));
+        assert!(matches!(knob(&a, "LOW 80Hz"), Action::Rotate { degrees, .. } if degrees < 0.0), "{:?}", a.knobs);
+    }
     #[test] fn save_needs_positions() {
         let (p, _, s) = knob_setup();
         let g = &p.groups[0];
