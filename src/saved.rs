@@ -1,5 +1,6 @@
-//! Expert sounds saved for restore, with the centre (flat-start) sound they were made from when known:
+//! Expert sounds saved for restore, with the knob positions they were made with when entered:
 //! one tab-separated line each in `saved.tsv`.
+use crate::advice::Positions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -14,14 +15,8 @@ pub struct Saved {
     pub bands_db: [f32; 25],
     /// Analysis sample rate (Hz); `None` for sounds saved by 0.3.1 and older.
     pub sample_rate: Option<u32>,
-    /// The centre analysis (EQ at 12 o'clock, low cut and COMP off) on the same channel; `None` when unknown or saved by 0.3.x.
-    pub flat: Option<Flat>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Flat {
-    pub dynamic_range_db: f32,
-    pub bands_db: [f32; 25],
+    /// Knob positions entered for this sound (`advice::Positions`); `None` when not entered or saved by 0.4.0 and older.
+    pub knobs: Option<Positions>,
 }
 
 /// Tabs, line breaks and U+FFFD (which marks a mis-encoded line on read) become spaces; ends trimmed.
@@ -29,15 +24,17 @@ pub fn clean(s: &str) -> String {
     s.replace(['\t', '\r', '\n', '\u{fffd}'], " ").trim().to_owned()
 }
 
-/// Tab-separated: name, mixer, group, dynamic range, 25 bands, then the sample rate when known, then the centre
-/// dynamic range and 25 bands when both the sample rate and the centre sound are known (29, 30 or 56 fields).
+/// Tab-separated: name, mixer, group, dynamic range, 25 bands, then the sample rate when known, then the knob
+/// positions as `label=value;…` when both the sample rate and the positions are known (29, 30 or 31 fields).
+/// 0.4.0's 56-field lines (30 + the centre sound) are read, never written.
 pub fn to_line(s: &Saved) -> String {
     let mut f = vec![clean(&s.name), clean(&s.mixer), clean(&s.group)];
     let num = |v: &f32| format!("{v:.2}");
     f.extend([s.dynamic_range_db].iter().chain(&s.bands_db).map(num));
     f.extend(s.sample_rate.map(|r| r.to_string()));
-    if let (Some(_), Some(flat)) = (s.sample_rate, &s.flat) {
-        f.extend([flat.dynamic_range_db].iter().chain(&flat.bands_db).map(num));
+    // An empty field would not read back, and a bad line blocks writing the file.
+    if let (Some(_), Some(k)) = (s.sample_rate, s.knobs.as_ref().filter(|k| !k.is_empty())) {
+        f.push(k.iter().map(|(l, v)| format!("{l}={v}")).collect::<Vec<_>>().join(";"));
     }
     f.join("\t")
 }
@@ -49,22 +46,33 @@ fn sound(f: &[&str]) -> Option<(f32, [f32; 25])> {
     Some((dr, bands.try_into().ok()?))
 }
 
+/// `label=value;…`: every label non-empty, every value a finite number.
+fn knobs(field: &str) -> Option<Positions> {
+    field
+        .split(';')
+        .map(|item| {
+            let (l, v) = item.split_once('=')?;
+            let v = v.trim().parse().ok().filter(|v: &f32| v.is_finite())?;
+            (!l.is_empty()).then(|| (l.to_owned(), v))
+        })
+        .collect()
+}
+
 fn parse_line(line: &str) -> Option<Saved> {
     let f: Vec<&str> = line.split('\t').collect();
     let [name, mixer, group, nums @ ..] = f.as_slice() else { return None };
-    if name.trim().is_empty() || ![26, 27, 53].contains(&nums.len()) {
+    if name.trim().is_empty() || ![26, 27, 28, 53].contains(&nums.len()) {
         return None;
     }
     let (dynamic_range_db, bands_db) = sound(&nums[..26])?;
     let sample_rate = nums.get(26).map(|r| r.trim().parse()).transpose().ok()?;
-    let flat = match nums.get(27..) {
-        Some(f) if !f.is_empty() => {
-            let (dynamic_range_db, bands_db) = sound(f)?;
-            Some(Flat { dynamic_range_db, bands_db })
-        }
+    let knobs = match nums.get(27..) {
+        Some([k]) => Some(knobs(k)?),
+        // 0.4.0's centre sound: checked, then dropped.
+        Some(f) if !f.is_empty() => sound(f).map(|_| None)?,
         _ => None,
     };
-    Some(Saved { name: name.to_string(), mixer: mixer.to_string(), group: group.to_string(), dynamic_range_db, bands_db, sample_rate, flat })
+    Some(Saved { name: name.to_string(), mixer: mixer.to_string(), group: group.to_string(), dynamic_range_db, bands_db, sample_rate, knobs })
 }
 
 /// The sounds, and the first line (1-based) that does not parse (hand edits, truncation); those are skipped.
@@ -162,28 +170,48 @@ mod tests {
 
     fn sample(name: &str) -> Saved {
         Saved { name: name.into(), mixer: "Mackie ProFX22v3 (2019, LEVEL SET LED)".into(), group: "CH1-12 (COMP)".into(),
-                dynamic_range_db: 12.25, bands_db: std::array::from_fn(|i| -1.5 * i as f32), sample_rate: Some(48_000), flat: None }
+                dynamic_range_db: 12.25, bands_db: std::array::from_fn(|i| -1.5 * i as f32), sample_rate: Some(48_000), knobs: None }
     }
-    fn with_flat(name: &str) -> Saved {
-        Saved { flat: Some(Flat { dynamic_range_db: 12.5, bands_db: [-30.0; 25] }), ..sample(name) }
+    fn with_knobs(name: &str) -> Saved {
+        let k = [("저역컷 100Hz", 1.0), ("HIGH 12kHz", 6.0), ("FREQ", 800.0), ("MID", -6.0), ("LOW 80Hz", -3.0), ("COMP", 30.0)];
+        Saved { knobs: Some(k.iter().map(|&(l, v)| (l.to_owned(), v)).collect()), ..sample(name) }
     }
-    #[test] fn flat_round_trip() {
-        let s = with_flat("가");
+    /// A 0.4.0 line: 30 fields, then the centre dynamic range and 25 bands.
+    fn line_56(name: &str) -> String {
+        format!("{}\t12.50{}", to_line(&sample(name)), "\t-30.00".repeat(25))
+    }
+    #[test] fn knobs_round_trip() {
+        let s = with_knobs("가");
         let line = to_line(&s);
-        assert_eq!(line.split('\t').count(), 56);
+        assert_eq!(line.split('\t').count(), 31);
+        assert_eq!(line.rsplit('\t').next(), Some("저역컷 100Hz=1;HIGH 12kHz=6;FREQ=800;MID=-6;LOW 80Hz=-3;COMP=30"));
         assert_eq!(parse(&line), (vec![s], None));
     }
-    #[test] fn older_lines_have_no_flat() {
-        let thirty = to_line(&with_flat("가")).split('\t').take(30).collect::<Vec<_>>().join("\t");
-        assert_eq!(parse(&thirty), (vec![sample("가")], None));
-        let no_rate = Saved { sample_rate: None, ..with_flat("가") }; // the centre sound is written only with a sample rate
+    #[test] fn older_lines_have_no_knobs() {
+        let no_rate = Saved { sample_rate: None, ..sample("가") };
         assert_eq!(to_line(&no_rate).split('\t').count(), 29);
-        assert_eq!(parse(&to_line(&no_rate)), (vec![Saved { flat: None, ..no_rate }], None));
+        assert_eq!(parse(&to_line(&no_rate)), (vec![no_rate], None));
+        assert_eq!(parse(&to_line(&sample("가"))), (vec![sample("가")], None));
+        assert_eq!(line_56("가").split('\t').count(), 56);
+        assert_eq!(parse(&line_56("가")), (vec![sample("가")], None));
+        assert_eq!(parse(&line_56("가").replace("-30.00", "abc")), (vec![], Some(1)));
+    }
+    #[test] fn knobs_need_a_sample_rate() {
+        let no_rate = Saved { sample_rate: None, ..with_knobs("가") };
+        assert_eq!(to_line(&no_rate).split('\t').count(), 29);
+        assert_eq!(parse(&to_line(&no_rate)), (vec![Saved { knobs: None, ..no_rate }], None));
+    }
+    #[test] fn bad_knob_field() {
+        for k in ["HIGH=abc", "HIGH", "", "=3", "HIGH=NaN", "HIGH=1;"] {
+            assert_eq!(parse(&format!("{}\t{k}", to_line(&sample("가")))), (vec![], Some(1)), "{k:?}");
+        }
     }
     #[test] fn wrong_field_count_is_bad() {
-        let line = to_line(&with_flat("가"));
+        let line = line_56("가");
         let f: Vec<&str> = line.split('\t').collect();
-        for n in [31, 55] { assert_eq!(parse(&f[..n].join("\t")), (vec![], Some(1)), "{n}"); }
+        for l in [format!("{}\tHIGH=1", to_line(&with_knobs("가"))), f[..55].join("\t"), format!("{line}\t1.00")] {
+            assert_eq!(parse(&l), (vec![], Some(1)), "{}", l.split('\t').count());
+        }
     }
     #[test] fn line_roundtrip() {
         let s = sample("홍길동 목사님 설교");

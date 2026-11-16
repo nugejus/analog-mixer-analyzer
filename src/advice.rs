@@ -14,6 +14,15 @@ const LOW_BOOST_MAX_DB: f32 = 3.0;
 const HIGH_BOOST_MAX_DB: f32 = 6.0;
 const OK_BELOW_DB: f32 = 1.5;
 const OK_RELEASE_DB: f32 = 2.5;
+/// 입력한 위치로 복구할 때의 ✓ 범위: 노브마다 max(OK_RELEASE_DB, NOISE_Z·σ). σ는 차이 d에 대역마다 독립인 TAKE_NOISE_DB
+/// 잡음이 있을 때 그 노브 게인의 표준편차입니다.
+/// ponytail: 실측 녹음이 아니라 균일 ±1 dB 잡음 시뮬레이션으로 고른 값(저장·오늘 두 녹음의 차이라 √(2/3) dB, Z는 같은
+/// 소리를 다시 녹음했을 때 ✓ 아닌 노브가 나오는 비율이 그룹 종류마다(두 스윕 제외) 5% 안팎인 가장 작은 값, K·FREQ에 따라
+/// 더 높기도 함). 실측 녹음이 모이면 다시 고르세요. 녹음마다 다르게 하려면 맞춤의 가중 잔차(`fit_eq_in`의 셋째 값)로 잴 수 있습니다.
+const TAKE_NOISE_DB: f32 = 0.8;
+const NOISE_Z: f32 = 2.75;
+/// 자유도(EQ 노브 수)별 χ² 99.9% 값: 돌릴 양 전체의 d²가 이보다 크면 잡음이 아닙니다.
+const CHI2_999: [f32; 5] = [0.0, 10.83, 13.82, 16.27, 18.47];
 pub const NO_INPUT: &str = "입력 신호가 없습니다. 케이블과 입력장치를 확인하세요. macOS에서는 시스템 설정 > 개인정보 보호 및 보안 > 마이크에서 이 앱을 허용하세요.";
 const KEEP_TALKING: &str = "말소리가 부족합니다. [분석]을 다시 누르고 녹음이 끝날 때까지 평소처럼 말씀해 주세요.";
 pub const OVERLOAD: &str = "과부하 의심: 아날로그 단에서 눌리거나 COMP가 과한 경우입니다.";
@@ -66,7 +75,20 @@ fn fit_eq_in(deviation: &[f32; 25], shapes: &[Shape], bands: std::ops::RangeIncl
     for (i, mi) in m.iter_mut().enumerate().skip(1) {
         mi[i] += lambda;
     }
-    // 대칭 양정치(Σw > 0, λ > 0)라 피벗 없이 가우스 소거해도 됩니다.
+    let mut x = solve(m);
+    let resid = bands
+        .map(|b| {
+            let fit: f32 = row(b).iter().zip(&x).map(|(a, x)| a * x).sum();
+            weight(b) * (-deviation[b] - fit).powi(2)
+        })
+        .sum();
+    let c = x.remove(0);
+    (x, c, resid)
+}
+
+/// 확대 행렬 [M | y]에서 x = M⁻¹y. M이 대칭 양정치(맞춤은 Σw > 0, λ > 0)라 피벗 없이 가우스 소거해도 됩니다.
+fn solve(mut m: Vec<Vec<f32>>) -> Vec<f32> {
+    let n = m.len();
     for k in 0..n {
         let (top, bot) = m.split_at_mut(k + 1);
         let p = &top[k];
@@ -82,14 +104,24 @@ fn fit_eq_in(deviation: &[f32; 25], shapes: &[Shape], bands: std::ops::RangeIncl
         let s: f32 = (i + 1..n).map(|j| m[i][j] * x[j]).sum();
         x[i] = (m[i][n] - s) / m[i][i];
     }
-    let resid = bands
-        .map(|b| {
-            let fit: f32 = row(b).iter().zip(&x).map(|(a, x)| a * x).sum();
-            weight(b) * (-deviation[b] - fit).powi(2)
-        })
-        .sum();
-    let c = x.remove(0);
-    (x, c, resid)
+    x
+}
+
+/// 대역마다 독립인 1 dB 잡음에서 맞춘 게인의 공분산: M⁻¹AᵀW²AM⁻¹, M = AᵀWA + λD.
+/// 맞춤이 d에 선형이라 대역마다 1 dB 하나만 넣은 맞춤의 게인끼리 곱해 더하면 됩니다.
+fn gain_cov(shapes: &[Shape]) -> Vec<Vec<f32>> {
+    let mut cov = vec![vec![0.0; shapes.len()]; shapes.len()];
+    for b in FIT_BANDS {
+        let mut e = [0.0; 25];
+        e[b] = 1.0;
+        let g = fit_eq_in(&e, shapes, FIT_BANDS, LAMBDA).0;
+        for (ci, gi) in cov.iter_mut().zip(&g) {
+            for (cij, gj) in ci.iter_mut().zip(&g) {
+                *cij += gi * gj;
+            }
+        }
+    }
+    cov
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -129,6 +161,8 @@ pub struct Inputs<'a> {
     pub silent: bool,
     /// `Some(저장 DR)`이면 복구 모드.
     pub restore_dynamic_range_db: Option<f32>,
+    /// 지금 노브 위치. `None`이거나 그룹과 맞지 않으면(`fits`) 가운데.
+    pub current: Option<&'a Positions>,
 }
 
 /// 5° 단위로 반올림한 회전 각도.
@@ -187,6 +221,80 @@ pub fn labels(group: &ChannelGroup) -> Vec<Advice> {
     knobs(group, |_, _| Action::Wait)
 }
 
+/// 노브 위치: `labels`의 라벨(GAIN 제외) 순서대로 값 하나. EQ는 가운데에서 dB, FREQ는 Hz(0 = 모름),
+/// 저역컷은 1 켬·0 끔, COMP는 왼쪽 끝에서 각도.
+pub type Positions = Vec<(String, f32)>;
+
+/// 모든 노브 가운데(EQ 0, 저역컷·COMP 꺼짐, FREQ 모름).
+pub fn centre(group: &ChannelGroup) -> Positions {
+    labels(group).into_iter().filter(|k| !matches!(k.control, Control::Gain { .. })).map(|k| (k.label, 0.0)).collect()
+}
+
+/// 라벨이 그룹과 같은 순서로 정확히 같으면 참.
+pub fn fits(group: &ChannelGroup, p: &Positions) -> bool {
+    p.iter().map(|e| &e.0).eq(centre(group).iter().map(|e| &e.0))
+}
+
+/// 스윕 MID의 FREQ 후보(범위 안의 1/3옥타브 공칭값). 스윕이 아니면 빈 목록.
+pub fn freq_choices(control: Control) -> Vec<f32> {
+    sweep(control).map_or(vec![], |(lo, hi)| BANDS_HZ.into_iter().filter(|f| (lo..=hi).contains(f)).collect())
+}
+
+/// controls 순서로 (값, FREQ Hz): EQ dB·저역컷·COMP 값, 스윕 MID는 그 FREQ도. 맞지 않거나 없으면 모두 0.
+fn per_control(group: &ChannelGroup, p: Option<&Positions>) -> Vec<(f32, f32)> {
+    let mut v = p.filter(|p| fits(group, p)).into_iter().flatten().map(|e| e.1);
+    group
+        .controls
+        .iter()
+        .map(|&c| match c {
+            Control::Gain { .. } => (0.0, 0.0),
+            c if sweep(c).is_some() => {
+                let hz = v.next().unwrap_or(0.0);
+                (v.next().unwrap_or(0.0), hz)
+            }
+            _ => (v.next().unwrap_or(0.0), 0.0),
+        })
+        .collect()
+}
+
+/// 추천을 따른 뒤의 위치(GAIN 제외). ✓와 Wait는 `from`의 값 그대로입니다.
+pub fn targets(knobs: &[Advice], from: &Positions) -> Positions {
+    knobs
+        .iter()
+        .filter(|k| !matches!(k.control, Control::Gain { .. }))
+        .map(|k| {
+            let was = from.iter().find(|e| e.0 == k.label).map_or(0.0, |e| e.1);
+            let v = match k.action {
+                Action::Rotate { degrees, .. } if k.control == Control::Comp => was + degrees,
+                Action::Rotate { db, .. } => db,
+                Action::SetFreq { hz } => hz,
+                Action::SwitchOn => 1.0,
+                _ => was,
+            };
+            (k.label.clone(), v)
+        })
+        .collect()
+}
+
+/// 저장된 위치를 가운데에서 그릴 동작으로(GAIN과 가운데인 노브는 ✓).
+pub fn as_advice(group: &ChannelGroup, p: &Positions) -> Vec<Advice> {
+    let k = per_control(group, Some(p));
+    knobs(group, |i, freq| {
+        let (v, hz) = k[i];
+        match group.controls[i] {
+            Control::Gain { .. } => Action::Ok,
+            _ if freq => if v != 0.0 && hz > 0.0 { Action::SetFreq { hz } } else { Action::Ok },
+            Control::LowCut { .. } if v > 0.0 => Action::SwitchOn,
+            Control::Comp if v > 0.0 => Action::Rotate { degrees: v, db: 0.0 },
+            Control::HighShelf { .. } | Control::Mid { .. } | Control::LowShelf { .. } if v != 0.0 => Action::Rotate {
+                degrees: rotate_degrees(v, KNOB_TRAVEL_DEG / (2.0 * EQ_RANGE_DB)),
+                db: v,
+            },
+            _ => Action::Ok,
+        }
+    })
+}
+
 #[derive(Default)]
 pub struct AdviceEngine {
     controls: Vec<Control>,
@@ -224,6 +332,13 @@ impl AdviceEngine {
         let mut d: [f32; 25] = std::array::from_fn(|b| s.bands_db[b] - inp.target[b]);
         let ctl = &group.controls;
         let restore = inp.restore_dynamic_range_db;
+        // 지금 위치 K(controls 순서로 (값, FREQ)). K의 FREQ를 지난 추천으로 넣어 소리가 같으면 그대로 둡니다.
+        let k = per_control(group, inp.current);
+        for (f, &(_, kf)) in self.freq.iter_mut().zip(&k) {
+            if kf > 0.0 {
+                *f = Some(kf);
+            }
+        }
 
         // EQ 노브와 각 노브의 Bell 주파수(스윕은 지난 추천, 없으면 후보 가운데).
         let eq: Vec<usize> = (0..ctl.len())
@@ -234,15 +349,13 @@ impl AdviceEngine {
                 )
             })
             .collect();
-        let cands =
-            |(lo, hi): (f32, f32)| -> Vec<f32> { BANDS_HZ.into_iter().filter(|f| (lo..=hi).contains(f)).collect() };
         let hz: Vec<f32> = ctl
             .iter()
             .zip(&self.freq)
             .map(|(&c, f)| match (c, sweep(c)) {
                 (_, Some(r)) => f
                     .or_else(|| {
-                        let v = cands(r);
+                        let v = freq_choices(c);
                         v.get(v.len() / 2).copied()
                     })
                     .unwrap_or(r.0),
@@ -259,6 +372,13 @@ impl AdviceEngine {
                 })
                 .collect()
         };
+        // 맞춤은 K에서 돌릴 양을 구합니다(λ도 그 양에): 가운데로 끌면 거의 겹치는 노브(Signature 22의 MID 2 80 Hz와
+        // LOW 60 Hz)가 같은 소리에서도 K와 다른 조합·주파수로 갈립니다. 가운데 소리 d에 K의 모양을 다시 더해 맞춥니다.
+        let k_eq = |sh: &[Shape], f: f32| -> f32 { eq.iter().zip(sh).map(|(&i, s)| k[i].0 * s.response(f)).sum() };
+        let fit = |d: &[f32; 25], sh: &[Shape], bands: std::ops::RangeInclusive<usize>, lambda: f32| {
+            let dk: [f32; 25] = std::array::from_fn(|b| d[b] + k_eq(sh, BANDS_HZ[b]));
+            fit_eq_in(&dk, sh, bands, lambda)
+        };
 
         // 스윕 MID: 후보 중 잔차 최소, 지난 주파수보다 20% 이상 좋을 때만 바꿈. 둘이면 좌표 하강 2회.
         // 다만 지난 주파수가 없는 두 스윕(앱은 늘 새 엔진)은 모든 쌍을 봅니다. 좌표 하강은 엉뚱한 쌍에 갇혀
@@ -270,15 +390,15 @@ impl AdviceEngine {
                 && self.freq[a].is_none()
                 && self.freq[b].is_none()
             {
-                let cb = cands(sweep(ctl[b]).expect("sweep"));
-                let best = cands(sweep(ctl[a]).expect("sweep"))
+                let cb = freq_choices(ctl[b]);
+                let best = freq_choices(ctl[a])
                     .into_iter()
                     .flat_map(|fa| cb.iter().map(move |&fb| (fa, fb)))
                     .filter(|(fa, fb)| (fa / fb).log2().abs() >= 1.0) // 아래와 같은 1옥타브 가드
                     .map(|(fa, fb)| {
                         let mut h = hz.clone();
                         (h[a], h[b]) = (fa, fb);
-                        let r = fit_eq(d, &shapes(&h)).2;
+                        let r = fit(d, &shapes(&h), FIT_BANDS, LAMBDA).2;
                         (h, r)
                     })
                     .min_by(|p, q| p.1.total_cmp(&q.1));
@@ -291,10 +411,10 @@ impl AdviceEngine {
                         let resid = |f: f32| {
                             let mut h = hz.clone();
                             h[i] = f;
-                            fit_eq(d, &shapes(&h)).2
+                            fit(d, &shapes(&h), FIT_BANDS, LAMBDA).2
                         };
                         // 두 스윕이 같은 주파수에서 게인을 반씩 나누면 둘 다 ✓가 되므로 1옥타브 이상 떨어뜨립니다.
-                        let best = cands(sweep(ctl[i]).expect("sweep"))
+                        let best = freq_choices(ctl[i])
                             .into_iter()
                             .filter(|&f| sweeps.iter().all(|&j| j == i || (f / hz[j]).log2().abs() >= 1.0))
                             .map(|f| (f, resid(f)))
@@ -317,12 +437,20 @@ impl AdviceEngine {
             _ => None,
         });
         let with_cut = |d: &[f32; 25], fc: f32| -> [f32; 25] { std::array::from_fn(|b| d[b] + hpf_db(fc, BANDS_HZ[b])) };
-        let switch = match (restore, cut) {
+        // 측정에서 K의 EQ 모양(저역컷 켬이면 그 응답도)을 빼 가운데에서 잰 소리로 봅니다. K의 저역컷 켬은
+        // 늘 ✓이고 맞춤은 켜진 것으로 합니다.
+        let k_cut = ctl.iter().zip(&k).any(|(c, k)| matches!(c, Control::LowCut { .. }) && k.0 > 0.0);
+        let k_shapes = shapes(&hz);
+        d = std::array::from_fn(|b| {
+            let f = BANDS_HZ[b];
+            d[b] - k_eq(&k_shapes, f) - cut.filter(|_| k_cut).map_or(0.0, |fc| hpf_db(fc, f))
+        });
+        let switch = k_cut || match (restore, cut) {
             // 복구: 스위치 응답을 넣은 맞춤과 뺀 맞춤 중 63 Hz–12.5 kHz에서 더 잘 맞는 쪽. 75·80 Hz 스위치는
             // 63·80 Hz와 125·160 Hz의 차이가 3 dB 남짓이라 그 평균 비교로는 잡음이나 저중역 컷에 묻힙니다.
             (Some(_), Some(fc)) => {
                 let cost = |d: &[f32; 25]| {
-                    let (g, _, r) = fit_eq_in(d, &shapes(&pick(d)), 0..=*FIT_BANDS.end(), SWITCH_LAMBDA);
+                    let (g, _, r) = fit(d, &shapes(&pick(d)), 0..=*FIT_BANDS.end(), SWITCH_LAMBDA);
                     r + SWITCH_LAMBDA * g.iter().map(|g| g * g).sum::<f32>()
                 };
                 cost(&with_cut(&d, fc)) < cost(&d)
@@ -340,7 +468,26 @@ impl AdviceEngine {
         for &i in &sweeps {
             self.freq[i] = Some(hz[i]);
         }
-        let (gains, c, _) = fit_eq(&d, &shapes(&hz));
+        let sh = shapes(&hz);
+        let (turn, c, _) = fit(&d, &sh, FIT_BANDS, LAMBDA);
+        let gains: Vec<f32> = turn.iter().zip(&eq).map(|(g, &i)| g + k[i].0).collect();
+        // 입력한 위치로 복구할 때는 녹음마다 생기는 차이를 쫓지 않습니다: 60·80 Hz LOW와 12 kHz HIGH는 맞춤 대역 몇 개에만
+        // 걸려 대역 잡음이 큰 게인 차이가 되므로 ✓ 범위를 그 노브의 잡음 크기까지 넓힙니다(가운데 분석과 보통 모드는 그대로).
+        // 다만 범위 안에 남은 노브들의 돌릴 양을 합친 d²가 잡음 밖이면 소리가 바뀐 것이라 넓히지 않습니다: FREQ가
+        // LOW·HIGH와 겹치면 둘의 몫만 불확실해 노브마다의 범위는 10 dB까지 넓지만, 합친 차이는 잡음과 구별됩니다.
+        // 이미 제 범위를 넘은 노브는 d²에서 빼서, 한 노브가 실제로 바뀌었다고 다른 노브의 범위까지 좁히지 않습니다.
+        let release: Vec<f32> = if restore.is_some() && inp.current.is_some_and(|p| fits(group, p)) {
+            let cov = gain_cov(&sh);
+            let wide: Vec<f32> =
+                (0..eq.len()).map(|i| OK_RELEASE_DB.max(NOISE_Z * TAKE_NOISE_DB * cov[i][i].sqrt())).collect();
+            let q: Vec<usize> = (0..eq.len()).filter(|&i| turn[i].abs() <= wide[i]).collect();
+            let aug = q.iter().map(|&i| q.iter().map(|&j| cov[i][j]).chain([turn[i]]).collect()).collect();
+            let d2: f32 = q.iter().zip(solve(aug)).map(|(&i, x)| turn[i] * x).sum::<f32>() / TAKE_NOISE_DB.powi(2);
+            let changed = d2 > CHI2_999[q.len()];
+            wide.into_iter().map(|w| if changed { OK_RELEASE_DB } else { w }).collect()
+        } else {
+            vec![OK_RELEASE_DB; eq.len()]
+        };
 
         // 노브 추천이 그래프의 빨강/파랑 대역과 어긋나면 안 됩니다: 노브 중심이 빨간 대역이면 올리지 않고,
         // 파란 대역이면 깎지 않습니다(그래프와 같은 계산).
@@ -350,7 +497,7 @@ impl AdviceEngine {
 
         let mut main = vec![Action::Ok; ctl.len()];
         let mut freq_act = vec![Action::Ok; ctl.len()];
-        for (&i, &g) in eq.iter().zip(&gains) {
+        for ((&i, &g), &rel) in eq.iter().zip(&gains).zip(&release) {
             // 보통 모드에서 켜기 권장이면 LOW 부스트 없음: 맞춤 범위(100 Hz~) 밖 63·80 Hz는 아직 넘치는데
             // 스위치가 100–160 Hz에서 깎은 만큼을 LOW가 되채우면 같은 저역을 둘이 반대로 쫓습니다.
             let max = if restore.is_none() && matches!(ctl[i], Control::LowShelf { .. }) {
@@ -364,28 +511,33 @@ impl AdviceEngine {
                 Control::LowShelf { hz } | Control::HighShelf { hz } => hz,
                 _ => hz[i],
             };
-            let (mut max, mut min) = (max, -EQ_LIMIT_DB);
+            // 한도는 목표 위치에, 대역 가드는 지금 위치 K에서 올리기·깎기에 겁니다(K가 한도 밖이어도 가드가 이깁니다).
+            let (kv, kf) = k[i];
+            let mut g = g.clamp(-EQ_LIMIT_DB, max);
             // 첫 구간(80 Hz) 아래 LOW(Signature 60 Hz)도 웅웅거림 구간을 따릅니다.
             let centre = centre.max(TONE_BANDS[0].1);
             if let Some(t) = TONE_BANDS.iter().position(|&(_, lo, hi)| (lo..hi).contains(&centre)) {
                 if tone[t] >= TONE_HOT_DB {
-                    max = max.min(0.0);
+                    g = g.min(kv);
                 } else if tone[t] <= -TONE_HOT_DB {
-                    min = 0.0;
+                    g = g.max(kv);
                 }
             }
-            let g = g.clamp(min, max);
             let ok = &mut self.ok[i];
-            if *ok && g.abs() > OK_RELEASE_DB {
+            if *ok && (g - kv).abs() > rel {
                 *ok = false;
-            } else if !*ok && g.abs() < OK_BELOW_DB {
+            } else if !*ok && (g - kv).abs() < OK_BELOW_DB {
                 *ok = true;
             }
             if !*ok {
                 main[i] = Action::Rotate {
-                    degrees: rotate_degrees(g, KNOB_TRAVEL_DEG / (2.0 * EQ_RANGE_DB)),
+                    degrees: rotate_degrees(g - kv, KNOB_TRAVEL_DEG / (2.0 * EQ_RANGE_DB)),
                     db: g,
                 };
+            }
+            // FREQ: 고른 주파수가 K와 다르고 MID 목표가 ✓ 범위 밖일 때만. K의 MID가 0이면 그 ✓가 곧 위의 ✓입니다.
+            let mid_off = if kv == 0.0 { !*ok } else { g.abs() > rel };
+            if hz[i] != kf && mid_off {
                 freq_act[i] = Action::SetFreq { hz: hz[i] };
             }
         }
@@ -412,9 +564,9 @@ impl AdviceEngine {
                         db,
                     }
                 }
-                Control::LowCut { .. } if switch => Action::SwitchOn,
-                Control::Comp if comp => Action::Rotate {
-                    degrees: 30.0,
+                Control::LowCut { .. } if switch && !k_cut => Action::SwitchOn,
+                Control::Comp if comp && k[i].0 < 30.0 => Action::Rotate {
+                    degrees: 30.0 - k[i].0,
                     db: 0.0,
                 },
                 _ => continue,
@@ -445,66 +597,6 @@ impl AdviceEngine {
     }
 }
 
-/// 가운데 소리(측정)에서 완성 소리(목표)를 만든 노브 위치: 새 엔진의 복구 계산(저장 DR = 완성 DR).
-/// GAIN은 가운데 소리와 상관없으므로 늘 ✓이고, 엔진 노트는 버립니다. EQ 노브가 끝(±15 dB)에 닿으면 두 소리
-/// 차이를 노브로 설명하지 못한 것이라(두 분석 사이에 말하는 사람·마이크가 바뀜) `None`입니다.
-pub fn knob_positions(group: &ChannelGroup, flat: &Summary, final_bands: &[f32; 25], final_dr: f32) -> Option<Vec<Advice>> {
-    let inp = Inputs {
-        summary: Some(flat),
-        target: final_bands,
-        clipped_recently: false,
-        feedback_hz: None,
-        silent: false,
-        restore_dynamic_range_db: Some(final_dr),
-    };
-    let mut knobs = AdviceEngine::new().advise(group, &inp).knobs;
-    for k in knobs.iter_mut().filter(|k| matches!(k.control, Control::Gain { .. })) {
-        k.action = Action::Ok;
-    }
-    // GAIN은 ✓, COMP의 db는 0이라 EQ 노브만 걸립니다.
-    let railed = knobs.iter().any(|k| matches!(k.action, Action::Rotate { db, .. } if db.abs() >= EQ_LIMIT_DB));
-    (!railed).then_some(knobs)
-}
-
-/// 저장된 가운데 소리(대역과 DR만 있음)를 `knob_positions`에 넣을 요약으로. 나머지 값은 엔진이 따로 반응하지 않게 고릅니다.
-pub fn neutral_summary(bands_db: [f32; 25], dynamic_range_db: f32) -> Summary {
-    Summary {
-        bands_db,
-        bin_power: vec![], // 엔진은 쓰지 않음
-        peak_db: -12.0, // GAIN 목표 피크: 올리기(< −24)도 내리기(> −6)도 없음
-        rms_db: -24.0, // peak − crest
-        noise_floor_db: -70.0, // rms − snr
-        snr_db: 46.0, // 30 이상: 잡음 노트 없음
-        dynamic_range_db,
-        crest_db: 12.0, // 9 이상: 과부하 아님(복구 COMP는 DR만 봄)
-        active_seconds: 20.0, // 말소리 충분
-    }
-}
-
-/// 같은 라벨끼리 EQ 노브가 3 dB 이상(✓는 ±2.5 dB 안의 가장 가까운 값), FREQ가 한 칸(1/3옥타브) 넘게, 또는 저역컷 켜기 여부가 다르면 참.
-/// 한쪽에만 있는 라벨은 무시하고, 한쪽이 Wait(말소리 부족)면 비교할 추천이 없으니 거짓입니다.
-pub fn knobs_differ(a: &[Advice], b: &[Advice]) -> bool {
-    if a.iter().chain(b).any(|k| k.action == Action::Wait) {
-        return false;
-    }
-    // 새 엔진의 ✓는 |g| ≤ 2.5라, ✓와는 그 범위에서 가장 가까운 값과 잽니다(✓ 경계를 오가는 잡음으로 노트가 뜨지 않게).
-    let gap = |p: &Action, q: &Action| match (p, q) {
-        (Action::Rotate { db: a, .. }, Action::Rotate { db: b, .. }) => (a - b).abs(),
-        (Action::Rotate { db, .. }, _) | (_, Action::Rotate { db, .. }) => db.abs() - OK_RELEASE_DB,
-        _ => 0.0,
-    };
-    a.iter().any(|x| {
-        b.iter().filter(|y| y.label == x.label).any(|y| match (&x.action, &y.action) {
-            // 공칭 대역은 이웃끼리 1.25–1.28배라 한 칸과 두 칸(≥ 1.56배) 사이인 0.5옥타브로 가릅니다.
-            (Action::SetFreq { hz: f }, Action::SetFreq { hz: g }) => (f / g).log2().abs() > 0.5,
-            (p, q) if matches!(x.control, Control::HighShelf { .. } | Control::Mid { .. } | Control::LowShelf { .. }) => {
-                gap(p, q) >= 3.0
-            }
-            (p, q) => (*p == Action::SwitchOn) != (*q == Action::SwitchOn),
-        })
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -518,7 +610,7 @@ fn summary(dev: impl Fn(f32) -> f32) -> Summary {
 }
 fn run(e: &mut AdviceEngine, g: &ChannelGroup, s: &Summary) -> AdviceSet {
     let t = ltass_db(Voice::Male);
-    e.advise(g, &Inputs { summary: Some(s), target: &t, clipped_recently: false, feedback_hz: None, silent: false, restore_dynamic_range_db: None })
+    e.advise(g, &Inputs { summary: Some(s), target: &t, clipped_recently: false, feedback_hz: None, silent: false, restore_dynamic_range_db: None, current: None })
 }
 fn act(a: &AdviceSet, label: &str) -> Action { a.knobs.iter().find(|k| k.label == label).unwrap().action.clone() }
 fn db_of(a: Action) -> f32 { match a { Action::Rotate { db, .. } => db, x => panic!("{x:?}") } }
@@ -567,7 +659,7 @@ const FX12: MixerModel = MixerModel::MackieProFx12v3;
     let mut s = summary(|f| 20.0 * Shape::Bell(3_000.0).response(f));
     s.peak_db = -2.0;
     let t = ltass_db(Voice::Male);
-    let a = AdviceEngine::new().advise(&group(V3, 0), &Inputs { summary: Some(&s), target: &t, clipped_recently: true, feedback_hz: None, silent: false, restore_dynamic_range_db: None });
+    let a = AdviceEngine::new().advise(&group(V3, 0), &Inputs { summary: Some(&s), target: &t, clipped_recently: true, feedback_hz: None, silent: false, restore_dynamic_range_db: None, current: None });
     assert_eq!(act(&a, "GAIN"), Action::Rotate { degrees: -50.0, db: -10.0 });
     for k in &a.knobs { if let Action::Rotate { degrees, db } = k.action { assert!(degrees.is_finite() && db.is_finite() && db.abs() <= 20.0); } }
     for k in a.knobs.iter().filter(|k| k.label != "GAIN") { if let Action::Rotate { db, .. } = k.action { assert!(db.abs() <= 15.0); } }
@@ -605,17 +697,17 @@ const FX12: MixerModel = MixerModel::MackieProFx12v3;
     let mut s = summary(|_| 0.0);
     s.snr_db = 20.0;
     let t = ltass_db(Voice::Male);
-    let a = AdviceEngine::new().advise(&group(V3, 0), &Inputs { summary: Some(&s), target: &t, clipped_recently: false, feedback_hz: Some(2_500.0), silent: false, restore_dynamic_range_db: None });
+    let a = AdviceEngine::new().advise(&group(V3, 0), &Inputs { summary: Some(&s), target: &t, clipped_recently: false, feedback_hz: Some(2_500.0), silent: false, restore_dynamic_range_db: None, current: None });
     assert!(a.notes.iter().any(|n| n.contains("2.5kHz")));
     assert!(a.notes.iter().any(|n| n.contains("마이크를")));
 }
 #[test] fn silent_input_waits() {
     let t = ltass_db(Voice::Male);
     let mut e = AdviceEngine::new();
-    let a = e.advise(&group(V3, 0), &Inputs { summary: None, target: &t, clipped_recently: false, feedback_hz: None, silent: true, restore_dynamic_range_db: None });
+    let a = e.advise(&group(V3, 0), &Inputs { summary: None, target: &t, clipped_recently: false, feedback_hz: None, silent: true, restore_dynamic_range_db: None, current: None });
     assert!(a.knobs.iter().all(|k| k.action == Action::Wait));
     assert!(a.notes.iter().any(|n| n.contains("입력 신호가 없습니다")));
-    let b = e.advise(&group(V3, 0), &Inputs { summary: None, target: &t, clipped_recently: false, feedback_hz: None, silent: false, restore_dynamic_range_db: None });
+    let b = e.advise(&group(V3, 0), &Inputs { summary: None, target: &t, clipped_recently: false, feedback_hz: None, silent: false, restore_dynamic_range_db: None, current: None });
     assert!(b.notes.iter().any(|n| n.contains("말소리가 부족합니다")));
 }
 #[test] fn group_change_resets_state() {
@@ -629,8 +721,9 @@ const FX12: MixerModel = MixerModel::MackieProFx12v3;
     assert_eq!(mids.len(), 1, "{:?}", a.knobs);
     assert!((-45.0..=-35.0).contains(&mids[0]), "{mids:?}");
 }
-fn run_t(g: &ChannelGroup, s: &Summary, target: [f32; 25], restore: Option<f32>) -> AdviceSet {
-    AdviceEngine::new().advise(g, &Inputs { summary: Some(s), target: &target, clipped_recently: false, feedback_hz: None, silent: false, restore_dynamic_range_db: restore })
+fn run_t(g: &ChannelGroup, s: &Summary, target: [f32; 25], restore: Option<f32>) -> AdviceSet { run_k(g, s, target, restore, None) }
+fn run_k(g: &ChannelGroup, s: &Summary, target: [f32; 25], restore: Option<f32>, current: Option<&Positions>) -> AdviceSet {
+    AdviceEngine::new().advise(g, &Inputs { summary: Some(s), target: &target, clipped_recently: false, feedback_hz: None, silent: false, restore_dynamic_range_db: restore, current })
 }
 fn with(dev: impl Fn(f32) -> f32) -> [f32; 25] { let t = ltass_db(Voice::Male); std::array::from_fn(|b| t[b] + dev(BANDS_HZ[b])) }
 #[test] fn hpf_db_values() {
@@ -726,93 +819,216 @@ const SHOT: [f32; 25] = [-2.3, -6.5, -10.5, 1.6, 7.0, 11.4, 1.7, 1.5, 3.4, 1.0, 
     assert_eq!(act(&run_t(&g, &s, t, None), "HIGH 12kHz"), Action::Ok);
 }
 
-fn at(k: &[Advice], label: &str) -> Action { k.iter().find(|k| k.label == label).unwrap().action.clone() }
+/// 그룹 순서의 위치: 가운데에서 `set`의 라벨만 바꿉니다.
+fn pos(g: &ChannelGroup, set: &[(&str, f32)]) -> Positions {
+    let mut p = centre(g);
+    for &(l, v) in set { p.iter_mut().find(|e| e.0 == l).unwrap().1 = v; }
+    p
+}
+/// 위치 p가 가운데 소리에 더하는 dB(엔진의 Shape와 hpf_db).
+fn model(g: &ChannelGroup, p: &Positions) -> [f32; 25] {
+    let v = |l: &str| p.iter().find(|e| e.0 == l).map_or(0.0, |e| e.1);
+    let ks = labels(g);
+    std::array::from_fn(|b| {
+        let f = BANDS_HZ[b];
+        ks.iter().map(|k| match k.control {
+            Control::HighShelf { hz } => v(&k.label) * Shape::HighShelf(hz).response(f),
+            Control::LowShelf { hz } => v(&k.label) * Shape::LowShelf(hz).response(f),
+            Control::LowCut { hz } if v(&k.label) > 0.0 => hpf_db(hz, f),
+            Control::Mid { lo_hz, hi_hz } if !k.label.starts_with("FREQ") => {
+                let hz = if lo_hz == hi_hz { lo_hz } else { v(&k.label.replace("MID", "FREQ")) };
+                v(&k.label) * Shape::Bell(hz).response(f)
+            }
+            _ => 0.0,
+        }).sum()
+    })
+}
+fn plus(a: [f32; 25], b: [f32; 25]) -> [f32; 25] { std::array::from_fn(|i| a[i] + b[i]) }
+#[test] fn same_sound_with_entered_positions_is_all_ok() {
+    let raw = summary(|_| 0.0).bands_db;
+    for m in MixerModel::ALL {
+        for g in MixerFactory::create(m).groups {
+            let (mut eq, mut sweeps) = ([6.0, -6.0, -3.0, 9.0, 4.0].into_iter().cycle(), 0);
+            let k: Positions = labels(&g).into_iter().filter(|a| !matches!(a.control, Control::Gain { .. })).map(|a| {
+                let v = match a.control {
+                    Control::LowCut { .. } => 1.0,
+                    Control::Comp => 30.0,
+                    c if a.label.starts_with("FREQ") => {
+                        sweeps += 1;
+                        let f = freq_choices(c);
+                        if sweeps == 1 { f[f.len() - 1] } else { f[0] }
+                    }
+                    _ => eq.next().unwrap(),
+                };
+                (a.label, v)
+            }).collect();
+            let s = sum_of(plus(raw, model(&g, &k)));
+            let a = run_k(&g, &s, s.bands_db, Some(s.dynamic_range_db), Some(&k));
+            assert!(a.knobs.iter().filter(|x| x.label != "GAIN").all(|x| x.action == Action::Ok), "{m:?} {}: {k:?} {:?}", g.label, a.knobs);
+        }
+    }
+}
+#[test] fn entered_matches_centre_on_fixed_mid() {
+    let g = group(FX12, 0);
+    let t = ltass_db(Voice::Male);
+    let set = model(&g, &pos(&g, &[("HIGH 12kHz", 5.0), ("MID 2.5kHz", -7.0), ("LOW 80Hz", 3.0)]));
+    let raw = sum_of(std::array::from_fn(|b| summary(|_| 0.0).bands_db[b] - set[b]));
+    let c = run_t(&g, &raw, t, None);
+    let k = pos(&g, &[("HIGH 12kHz", -2.0), ("MID 2.5kHz", 2.0), ("LOW 80Hz", -3.0)]);
+    let a = run_k(&g, &sum_of(plus(raw.bands_db, model(&g, &k))), t, None, Some(&k));
+    for (l, kv) in [("HIGH 12kHz", -2.0), ("MID 2.5kHz", 2.0), ("LOW 80Hz", -3.0)] {
+        let centre_db = db_of(act(&c, l));
+        match act(&a, l) {
+            Action::Rotate { degrees, db } => {
+                assert!((db - centre_db).abs() <= 0.5, "{l}: {db} vs {centre_db}");
+                assert_eq!(degrees, rotate_degrees(db - kv, 10.0), "{l}");
+            }
+            x => panic!("{l}: {x:?}"),
+        }
+    }
+}
+#[test] fn normal_mode_entered_keeps_the_fixed_ok_range() {
+    // 잡음 ✓ 범위는 복구(저장·오늘 두 녹음의 차이)에만 씁니다. 보통 모드는 가운데 K를 입력해도 가운데 분석과 같습니다.
+    let (g, t) = (group(FX12, 0), ltass_db(Voice::Male));
+    let s = summary(|f| 4.0 * Shape::LowShelf(80.0).response(f));
+    let c = act(&run_t(&g, &s, t, None), "LOW 80Hz");
+    assert!(matches!(c, Action::Rotate { .. }), "{c:?}");
+    assert_eq!(act(&run_k(&g, &s, t, None, Some(&centre(&g))), "LOW 80Hz"), c);
+}
+const V3_LABEL: [(&str, f32); 5] = [("저역컷 100Hz", 1.0), ("HIGH 12kHz", 6.0), ("FREQ", 800.0), ("MID", -6.0), ("LOW 80Hz", -3.0)];
+/// 라벨 k대로 맞추고 다시 녹음: 오늘 소리 = 저장한 소리(가운데 소리 + k) + today, 복구 모드, K = k.
+fn retake(g: &ChannelGroup, k: &Positions, today: impl Fn(f32) -> f32) -> AdviceSet {
+    let saved = plus(summary(|_| 0.0).bands_db, model(g, k));
+    let s = sum_of(std::array::from_fn(|b| saved[b] + today(BANDS_HZ[b])));
+    run_k(g, &s, saved, Some(s.dynamic_range_db), Some(k))
+}
+#[test] fn small_change_turns_one_knob() {
+    // 3 dB면 12 kHz HIGH의 잡음 ✓ 범위(여기서 약 3.9 dB) 안이라 ✓입니다.
+    let g = group(V3, 0);
+    let a = retake(&g, &pos(&g, &V3_LABEL), |f| -5.0 * Shape::HighShelf(12_000.0).response(f));
+    match act(&a, "HIGH 12kHz") {
+        Action::Rotate { degrees, db } => assert!((10.0..=12.0).contains(&db) && (40.0..=60.0).contains(&degrees), "{db} {degrees}"),
+        x => panic!("{x:?}"),
+    }
+    for l in ["FREQ", "MID", "LOW 80Hz", "저역컷 100Hz", "COMP"] { assert_eq!(act(&a, l), Action::Ok, "{l}: {:?}", a.knobs); }
+}
+/// 대역마다 ±1 dB인 고정 잡음.
+const NOISE: [f32; 25] = [-1., 1., -1., -1., -1., -1., 1., 1., 1., 1., 1., -1., -1., 1., -1., 1., 1., -1., -1., -1., 1., -1., -1., 1., -1.];
+fn noise(f: f32) -> f32 { NOISE[BANDS_HZ.iter().position(|&b| b == f).unwrap()] }
+#[test] fn take_noise_alone_is_all_ok() {
+    // ✓ 범위가 2.5 dB 고정이던 때는 LOW를 35°(80 Hz), 55°(Signature 12의 60 Hz) 돌리라고 했습니다.
+    let sig = [("저역컷 100Hz", 1.0), ("HIGH 12kHz", 4.0), ("FREQ", 2500.0), ("MID", -4.0), ("LOW 60Hz", -3.0)];
+    for (m, set) in [(V3, V3_LABEL), (MixerModel::SoundcraftSignature12, sig)] {
+        let g = group(m, 0);
+        let a = retake(&g, &pos(&g, &set), noise);
+        assert!(a.knobs.iter().filter(|x| x.label != "GAIN").all(|x| x.action == Action::Ok), "{m:?}: {:?}", a.knobs);
+    }
+}
+#[test] fn one_real_change_keeps_the_others_in_noise_range() {
+    // HIGH만 6 dB 어두워졌으면 HIGH만 돌리고, 잡음뿐인 LOW는 그대로입니다(d²는 범위 안에 남은 노브끼리).
+    let g = group(V3, 0);
+    let a = retake(&g, &pos(&g, &V3_LABEL), |f| noise(f) - 6.0 * Shape::HighShelf(12_000.0).response(f));
+    assert!(matches!(act(&a, "HIGH 12kHz"), Action::Rotate { degrees, .. } if degrees > 0.0), "{:?}", a.knobs);
+    assert_eq!(act(&a, "LOW 80Hz"), Action::Ok, "{:?}", a.knobs);
+}
+#[test] fn real_low_change_is_still_advised() {
+    // LOW를 라벨보다 6 dB 내려 두었으면 시계방향으로 되돌리게 합니다.
+    let g = group(V3, 0);
+    let a = retake(&g, &pos(&g, &V3_LABEL), |f| -6.0 * Shape::LowShelf(80.0).response(f));
+    assert!(matches!(act(&a, "LOW 80Hz"), Action::Rotate { degrees, .. } if degrees > 0.0), "{:?}", a.knobs);
+    for l in ["HIGH 12kHz", "FREQ", "MID", "저역컷 100Hz"] { assert_eq!(act(&a, l), Action::Ok, "{l}: {:?}", a.knobs); }
+    // FREQ 125 Hz MID와 겹친 LOW는 노브의 잡음 ✓ 범위가 10 dB 남짓이지만, 9 dB 붐은 돌릴 양 전체(d²)가 잡음 밖입니다.
+    let k = pos(&g, &[("저역컷 100Hz", 1.0), ("FREQ", 125.0), ("MID", -6.0), ("LOW 80Hz", -3.0)]);
+    let a = retake(&g, &k, |f| 9.0 * Shape::LowShelf(80.0).response(f));
+    assert!(matches!(act(&a, "LOW 80Hz"), Action::Rotate { degrees, .. } if degrees < 0.0), "{:?}", a.knobs);
+}
+#[test] fn freq_only_move() {
+    let g = group(V3, 0);
+    let raw = summary(|_| 0.0).bands_db;
+    let target = plus(raw, model(&g, &pos(&g, &[("FREQ", 2000.0), ("MID", -6.0)])));
+    let k = pos(&g, &[("FREQ", 800.0), ("MID", -6.0)]);
+    let s = sum_of(plus(raw, model(&g, &k)));
+    let a = run_k(&g, &s, target, Some(s.dynamic_range_db), Some(&k));
+    assert!(matches!(act(&a, "FREQ"), Action::SetFreq { hz } if [1600.0, 2000.0, 2500.0].contains(&hz)), "{:?}", a.knobs);
+    assert_eq!(act(&a, "MID"), Action::Ok, "{:?}", a.knobs);
+}
+#[test] fn entered_cut_and_comp_stay() {
+    let g = group(V3, 0);
+    let mut s = summary(|_| 0.0);
+    s.dynamic_range_db = 22.0; // 보통 COMP 규칙(크레스트 ≥ 9, DR > 18) 참, 저역컷 문턱은 거짓
+    let t = ltass_db(Voice::Male);
+    let c = run_t(&g, &s, t, None);
+    assert_eq!((act(&c, "저역컷 100Hz"), act(&c, "COMP")), (Action::Ok, Action::Rotate { degrees: 30.0, db: 0.0 }));
+    let a = run_k(&g, &s, t, None, Some(&pos(&g, &[("저역컷 100Hz", 1.0), ("COMP", 30.0)])));
+    assert_eq!((act(&a, "저역컷 100Hz"), act(&a, "COMP")), (Action::Ok, Action::Ok));
+    let comp = |v| act(&run_k(&g, &s, t, None, Some(&pos(&g, &[("COMP", v)]))), "COMP");
+    assert_eq!(comp(0.0), Action::Rotate { degrees: 30.0, db: 0.0 });
+    assert_eq!(comp(15.0), Action::Rotate { degrees: 15.0, db: 0.0 });
+}
+#[test] fn positions_helpers() {
+    let g = group(V3, 0);
+    assert!(fits(&g, &centre(&g)));
+    let mut short = centre(&g);
+    short.pop();
+    assert!(!fits(&g, &short));
+    let mut renamed = centre(&g);
+    renamed[1].0 = "HIGH".into();
+    assert!(!fits(&g, &renamed));
+    let p = pos(&g, &[("저역컷 100Hz", 1.0), ("HIGH 12kHz", 6.0), ("FREQ", 800.0), ("MID", -6.0), ("LOW 80Hz", -3.0), ("COMP", 30.0)]);
+    assert_eq!(targets(&as_advice(&g, &p), &centre(&g)), p);
+    assert_eq!(freq_choices(g.controls[3]), BANDS_HZ[2..=21]); // 100 Hz–8 kHz
+    assert!(freq_choices(group(FX12, 0).controls[3]).is_empty());
+}
+
+/// 0.4.0의 노브 위치 계산이 쓰던 엔진 동작: 가운데 소리(측정)에서 완성 소리(목표)로 가는 복구 추천.
+fn restore_from_centre(g: &ChannelGroup, fin: [f32; 25]) -> AdviceSet { run_t(g, &sum_of(ltass_db(Voice::Male)), fin, Some(10.0)) }
 #[test] fn recovers_known_settings() {
     let g = group(V3, 0);
     let flat = ltass_db(Voice::Male);
-    let fin = std::array::from_fn(|b| {
+    let k = restore_from_centre(&g, std::array::from_fn(|b| {
         let f = BANDS_HZ[b];
         flat[b] + 6.0 * Shape::HighShelf(12_000.0).response(f) - 6.0 * Shape::Bell(800.0).response(f)
             - 3.0 * Shape::LowShelf(80.0).response(f) + hpf_db(100.0, f)
-    });
-    let k = knob_positions(&g, &neutral_summary(flat, 10.0), &fin, 10.0).unwrap();
-    assert!((5.0..=7.0).contains(&db_of(at(&k, "HIGH 12kHz"))), "{k:?}");
-    assert!(matches!(at(&k, "FREQ"), Action::SetFreq { hz } if [630.0, 800.0, 1000.0].contains(&hz)), "{k:?}");
-    assert!((-7.0..=-5.0).contains(&db_of(at(&k, "MID"))), "{k:?}");
-    assert!((-4.0..=-2.0).contains(&db_of(at(&k, "LOW 80Hz"))), "{k:?}");
-    assert_eq!(at(&k, "저역컷 100Hz"), Action::SwitchOn);
-    assert_eq!(at(&k, "GAIN"), Action::Ok);
+    }));
+    assert!((5.0..=7.0).contains(&db_of(act(&k, "HIGH 12kHz"))), "{:?}", k.knobs);
+    assert!(matches!(act(&k, "FREQ"), Action::SetFreq { hz } if [630.0, 800.0, 1000.0].contains(&hz)), "{:?}", k.knobs);
+    assert!((-7.0..=-5.0).contains(&db_of(act(&k, "MID"))), "{:?}", k.knobs);
+    assert!((-4.0..=-2.0).contains(&db_of(act(&k, "LOW 80Hz"))), "{:?}", k.knobs);
+    assert_eq!(act(&k, "저역컷 100Hz"), Action::SwitchOn);
+    assert_eq!(act(&k, "GAIN"), Action::Ok);
 }
 #[test] fn recovers_signature22_two_sweeps() {
     // 좌표 하강은 (3150, 400)에 갇혀 HIGH +15, LOW +14를 내던 사례입니다.
     let g = group(MixerModel::SoundcraftSignature22, 0);
     let flat = ltass_db(Voice::Male);
-    let fin = std::array::from_fn(|b| {
+    let k = restore_from_centre(&g, std::array::from_fn(|b| {
         let f = BANDS_HZ[b];
         flat[b] + 6.0 * Shape::HighShelf(12_000.0).response(f) - 6.0 * Shape::Bell(1_000.0).response(f)
             - 4.0 * Shape::Bell(200.0).response(f) + hpf_db(100.0, f)
-    });
-    let k = knob_positions(&g, &neutral_summary(flat, 10.0), &fin, 10.0).unwrap();
-    assert!((5.0..=7.0).contains(&db_of(at(&k, "HIGH 12kHz"))), "{k:?}");
-    assert!(matches!(at(&k, "FREQ 1"), Action::SetFreq { hz } if [800.0, 1000.0, 1250.0].contains(&hz)), "{k:?}");
-    assert!((-7.0..=-5.0).contains(&db_of(at(&k, "MID 1"))), "{k:?}");
-    assert!(matches!(at(&k, "FREQ 2"), Action::SetFreq { hz } if [160.0, 200.0, 250.0].contains(&hz)), "{k:?}");
-    assert!((-5.0..=-3.0).contains(&db_of(at(&k, "MID 2"))), "{k:?}");
-    assert_eq!(at(&k, "LOW 60Hz"), Action::Ok);
-    assert_eq!(at(&k, "저역컷 100Hz"), Action::SwitchOn);
+    }));
+    assert!((5.0..=7.0).contains(&db_of(act(&k, "HIGH 12kHz"))), "{:?}", k.knobs);
+    assert!(matches!(act(&k, "FREQ 1"), Action::SetFreq { hz } if [800.0, 1000.0, 1250.0].contains(&hz)), "{:?}", k.knobs);
+    assert!((-7.0..=-5.0).contains(&db_of(act(&k, "MID 1"))), "{:?}", k.knobs);
+    assert!(matches!(act(&k, "FREQ 2"), Action::SetFreq { hz } if [160.0, 200.0, 250.0].contains(&hz)), "{:?}", k.knobs);
+    assert!((-5.0..=-3.0).contains(&db_of(act(&k, "MID 2"))), "{:?}", k.knobs);
+    assert_eq!(act(&k, "LOW 60Hz"), Action::Ok);
+    assert_eq!(act(&k, "저역컷 100Hz"), Action::SwitchOn);
 }
 #[test] fn finds_75hz_low_cut_under_a_low_mid_cut() {
     // 75 Hz 스위치는 63·80 Hz와 125·160 Hz 차이가 3.3 dB뿐이라 FREQ 200 MID 컷이 125·160 Hz를 내리면 묻혔습니다.
     let g = group(MixerModel::Mackie1604Vlz4, 0);
     let flat = ltass_db(Voice::Male);
     for (bell, db) in [(160.0, -4.0), (200.0, -5.0), (250.0, -6.0)] {
-        let fin = std::array::from_fn(|b| flat[b] + hpf_db(75.0, BANDS_HZ[b]) + db * Shape::Bell(bell).response(BANDS_HZ[b]));
-        let k = knob_positions(&g, &neutral_summary(flat, 10.0), &fin, 10.0).unwrap();
-        assert_eq!(at(&k, "저역컷 75Hz"), Action::SwitchOn, "{bell} {db}: {k:?}");
-        assert_eq!(at(&k, "LOW 80Hz"), Action::Ok, "{bell} {db}: {k:?}");
+        let k = restore_from_centre(&g, std::array::from_fn(|b| flat[b] + hpf_db(75.0, BANDS_HZ[b]) + db * Shape::Bell(bell).response(BANDS_HZ[b])));
+        assert_eq!(act(&k, "저역컷 75Hz"), Action::SwitchOn, "{bell} {db}: {:?}", k.knobs);
+        assert_eq!(act(&k, "LOW 80Hz"), Action::Ok, "{bell} {db}: {:?}", k.knobs);
     }
     // LOW만 깎았으면 스위치가 아닙니다.
-    let fin = std::array::from_fn(|b| flat[b] - 6.0 * Shape::LowShelf(80.0).response(BANDS_HZ[b]));
-    assert_eq!(at(&knob_positions(&g, &neutral_summary(flat, 10.0), &fin, 10.0).unwrap(), "저역컷 75Hz"), Action::Ok);
+    let k = restore_from_centre(&g, std::array::from_fn(|b| flat[b] - 6.0 * Shape::LowShelf(80.0).response(BANDS_HZ[b])));
+    assert_eq!(act(&k, "저역컷 75Hz"), Action::Ok);
 }
-#[test] fn flat_saved_right_after_flat_analysis_is_all_ok() {
-    let flat = ltass_db(Voice::Male);
-    let k = knob_positions(&group(V3, 0), &neutral_summary(flat, 10.0), &flat, 10.0).unwrap();
-    assert!(k.iter().all(|k| k.action == Action::Ok), "{k:?}");
-    // 규칙 3의 진짜 가운데 요약은 조용할 수 있지만(엔진은 GAIN +20을 냄) 노브 위치의 GAIN은 늘 ✓입니다.
-    let quiet = Summary { peak_db: -35.0, ..neutral_summary(flat, 10.0) };
-    assert_eq!(at(&knob_positions(&group(V3, 0), &quiet, &flat, 10.0).unwrap(), "GAIN"), Action::Ok);
-}
-#[test] fn speaker_change_gives_no_positions() {
-    // 가운데는 여성, 그대로는 남성(노브는 안 돌림): LOW가 +15 끝에 닿으니 노브 위치가 아닙니다.
-    let k = knob_positions(&group(V3, 0), &neutral_summary(ltass_db(Voice::Female), 10.0), &ltass_db(Voice::Male), 10.0);
-    assert!(k.is_none(), "{k:?}");
-}
-#[test] fn comp_from_dynamic_range() {
-    let flat = ltass_db(Voice::Male);
-    let comp = |flat_dr| at(&knob_positions(&group(V3, 0), &neutral_summary(flat, flat_dr), &flat, 12.0).unwrap(), "COMP");
-    assert_eq!(comp(18.0), Action::Rotate { degrees: 30.0, db: 0.0 });
-    assert_eq!(comp(12.0), Action::Ok);
-}
-#[test] fn knobs_differ_thresholds() {
-    let g = group(V3, 0);
-    let one = |label: &str, action: Action| -> Vec<Advice> {
-        let mut k = labels(&g);
-        for x in &mut k { x.action = if x.label == label { action.clone() } else { Action::Ok }; }
-        k
-    };
-    let mid = |db| one("MID", Action::Rotate { degrees: 0.0, db });
-    let freq = |hz| one("FREQ", Action::SetFreq { hz });
-    assert!(!knobs_differ(&mid(-3.0), &mid(-5.5)));
-    assert!(knobs_differ(&mid(-3.0), &mid(-6.0)));
-    assert!(!knobs_differ(&mid(-5.0), &one("", Action::Ok))); // ✓ = |g| ≤ 2.5
-    assert!(knobs_differ(&mid(-5.5), &one("", Action::Ok)));
-    assert!(!knobs_differ(&freq(800.0), &freq(1000.0)));
-    assert!(!knobs_differ(&freq(125.0), &freq(160.0))); // 이웃 후보: 공칭값이라 1.28배
-    assert!(knobs_differ(&freq(800.0), &freq(1250.0)));
-    assert!(knobs_differ(&one("저역컷 100Hz", Action::SwitchOn), &one("", Action::Ok)));
-    assert!(!knobs_differ(&one("COMP", Action::Rotate { degrees: 30.0, db: 0.0 }), &one("", Action::Ok)));
-    // 말소리 부족(모두 Wait)이면 비교할 추천이 없습니다.
-    assert!(!knobs_differ(&labels(&g), &mid(-6.0)));
+#[test] fn same_centre_sound_restores_all_ok() {
+    let k = restore_from_centre(&group(V3, 0), ltass_db(Voice::Male));
+    assert!(k.knobs.iter().all(|k| k.action == Action::Ok), "{:?}", k.knobs);
 }
 }
