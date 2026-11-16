@@ -38,17 +38,19 @@
 - `pub fn targets(knobs: &[Advice], from: &Positions) -> Positions` — 추천을 따른 뒤의 위치: EQ `Rotate` → `db`, COMP `Rotate` → from + degrees, `SetFreq` → hz, `SwitchOn` → 1, 그 밖(✓·Wait) → from의 값. GAIN은 건너뜀.
 - `pub fn as_advice(group: &ChannelGroup, p: &Positions) -> Vec<Advice>` — 저장된 위치를 가운데에서 그릴 동작으로: EQ ≠ 0 → `Rotate { degrees: rotate_degrees(db, 10°/dB), db }`, FREQ(그 MID ≠ 0이고 값 > 0) → `SetFreq`, 저역컷 1 → `SwitchOn`, COMP > 0 → `Rotate { degrees: K, db: 0.0 }`, 나머지와 GAIN → `Ok`.
 - `Inputs.current: Option<&'a Positions>` — `None` 또는 `fits`가 아니면 가운데. 동작은 spec "엔진" 절 그대로:
-  - 측정 대역 − K의 EQ 모양(Shape 응답 × dB, 저역컷 켬이면 + `hpf_db` 빼기)으로 가운데 소리를 만들어 지금 계산을 돌린다. 한도·가드는 목표 위치에 건다.
-  - EQ ✓ = |목표 − K| ≤ `OK_RELEASE_DB`(새 엔진). `Rotate { degrees: rotate_degrees(목표 − K, ..), db: 목표 }`.
-  - K의 FREQ(> 0)를 `self.freq`에 넣고 시작(히스테리시스). FREQ는 고른 hz ≠ K의 FREQ이고 |MID 목표| > `OK_RELEASE_DB`면 `SetFreq`, 아니면 ✓.
+  - 측정 대역 − K의 EQ 모양(Shape 응답 × dB, 저역컷 켬이면 + `hpf_db` 빼기)으로 가운데 소리를 만들어 지금 계산을 돌린다. 한도는 목표 위치에 건다. 대역 가드는 측정한 소리(`tone_excess(s.bands_db, ..)`)로 판단해 K에서 건다(빨강: 목표 ≤ K, 파랑: 목표 ≥ K).
+  - EQ ✓ = |목표 − K| ≤ 그 노브의 ✓ 범위(새 엔진). `Rotate { degrees: rotate_degrees(목표 − K, ..), db: 목표 }`. ✓ 범위는 `current`가 그룹에 맞으면 max(`OK_RELEASE_DB`, `NOISE_Z` · `TAKE_NOISE_DB` · `gain_sd`), 아니면 `OK_RELEASE_DB`. `gain_sd(shapes)`는 대역마다 독립인 1 dB 잡음에서 맞춘 게인의 표준편차(√diag(M⁻¹AᵀW²AM⁻¹), 맞춤이 d에 선형이라 대역마다 1 dB만 넣은 `fit_eq_in`의 게인 제곱 합), 고른 주파수에서. `TAKE_NOISE_DB` 0.8·`NOISE_Z` 2.75는 균일 ±1 dB 잡음 시뮬레이션으로 고른 값(ponytail 주석).
+  - K의 FREQ(> 0)를 `self.freq`에 넣고 시작(히스테리시스). FREQ는 고른 hz ≠ K의 FREQ이고 |MID 목표| > 그 MID의 ✓ 범위면 `SetFreq`, 아니면 ✓(K의 MID가 0이면 MID의 ✓ 상태).
   - K 저역컷 켬: ✓, 맞춤은 켜진 것으로. 끔: 지금처럼 켜기 판단.
   - COMP: K ≥ 30 → ✓; 아니면 지금 규칙이 참일 때 `Rotate { degrees: 30 − K, db: 0.0 }`.
 - `AdviceSet.level_offset_db` 뜻은 그대로(측정 ≈ 목표 + offset).
 
 - [ ] **Step 1: Write the failing tests** (advice.rs tests; build the finished/measured sound with the engine's own `Shape::response` and `hpf_db`, raw = `summary(|_| 0.0)`'s bands):
   - `same_sound_with_entered_positions_is_all_ok`: for every `MixerModel` × every group: K = EQ values cycling `[6, -6, -3, 9, 4]` in EQ order, first sweep FREQ = its highest candidate and a second sweep its lowest, 저역컷 1 if present, COMP 30 if present. measured = target = raw + model(K), restore DR = measured DR, `current: Some(&K)` → every knob except GAIN is `Ok`.
-  - `entered_matches_centre_on_fixed_mid`: ProFX12v3 group 0 (fixed MID). raw = male LTASS − 40 − EQ(HIGH +5, MID −7, LOW +3 with the group's shapes), so the centre analysis (`current: None`, target = male LTASS) gives those three as `Rotate` (assert it). K = HIGH −2, MID +2, LOW 0; measured = raw + model(K). With `current: Some(&K)` every EQ knob is `Rotate` whose `db` is within 0.5 of the centre analysis's `db`, and `degrees == rotate_degrees(db − K, 10.0)`.
-  - `small_change_turns_one_knob`: ProFX22v3 group 0 restore. K = 저역컷 1, HIGH 6, FREQ 800, MID −6, LOW −3. target = raw + model(K); measured = target − 3 × HighShelf(12 kHz) response. → HIGH `Rotate` with db ∈ [8, 10] and degrees ∈ [20, 40]; FREQ, MID, LOW, 저역컷, COMP `Ok`.
+  - `entered_matches_centre_on_fixed_mid`: ProFX12v3 group 0 (fixed MID). raw = male LTASS − 40 − EQ(HIGH +5, MID −7, LOW +3 with the group's shapes), so the centre analysis (`current: None`, target = male LTASS) gives those three as `Rotate` (assert it). K = HIGH −2, MID +2, LOW −3 (LOW 3 dB는 잡음 ✓ 범위 안이라 6 dB를 돌리게); measured = raw + model(K). With `current: Some(&K)` every EQ knob is `Rotate` whose `db` is within 0.5 of the centre analysis's `db`, and `degrees == rotate_degrees(db − K, 10.0)`.
+  - `small_change_turns_one_knob`: ProFX22v3 group 0 restore. K = 저역컷 1, HIGH 6, FREQ 800, MID −6, LOW −3. target = raw + model(K); measured = target − 5 × HighShelf(12 kHz) response (3 dB는 HIGH의 잡음 ✓ 범위 약 3.9 dB 안). → HIGH `Rotate` with db ∈ [10, 12] and degrees ∈ [40, 60]; FREQ, MID, LOW, 저역컷, COMP `Ok`.
+  - `take_noise_alone_is_all_ok`: restore, measured = target + a fixed ±1 dB band pattern, on ProFX22v3 group 0 (K as above) and Signature 12 group 0 (60 Hz LOW; 저역컷 1, HIGH 4, FREQ 2500, MID −4, LOW −3) → every knob except GAIN `Ok` (the fixed 2.5 dB ✓ turned LOW 35° and 55°).
+  - `real_low_change_is_still_advised`: ProFX22v3 group 0, K as above, measured = target − 6 × LowShelf(80 Hz) → LOW `Rotate` with degrees > 0; HIGH, FREQ, MID, 저역컷 `Ok`.
   - `freq_only_move`: ProFX22v3 group 0 restore. target = raw + model(FREQ 2000, MID −6); K = FREQ 800, MID −6, measured = raw + model(K). → FREQ `SetFreq` with hz ∈ {1600, 2000, 2500}; MID `Ok`.
   - `entered_cut_and_comp_stay`: a summary where the normal-mode switch test is false and the COMP rule is true (crest ≥ 9, DR > 18). K 저역컷 1, COMP 30 → both `Ok`. K COMP 0 → COMP `Rotate { degrees: 30.0, .. }`. K COMP 15 → `Rotate { degrees: 15.0, .. }`.
   - `positions_helpers`: `centre(g)` fits; dropping one entry or renaming a label → not fits; `targets(&as_advice(g, &p), &centre(g)) == p` for p = ProFX22v3 group 0 (저역컷 1, HIGH 6, FREQ 800, MID −6, LOW −3, COMP 30); `freq_choices` of a sweep equals the engine's candidates (e.g. ProFX22v3 MID range) and is empty for a fixed MID.
@@ -88,7 +90,7 @@
 - Produces (pure, testable):
   - `Analysis.entered: Option<Positions>` (confirmed positions of an as-is analysis; `None` for a centre analysis or before 확인). `App.editing: Option<Positions>` (open entry form).
   - `fn current(a: &Analysis, group: &ChannelGroup) -> Option<Positions>` — centre analysis → `Some(centre(group))`; as-is → `entered` if it `fits`.
-  - `advise(a, group, goal)` passes `current` (`None` for a centre analysis is fine: same result).
+  - `advise(a, group, goal)` passes the confirmed positions of an as-is analysis and `None` for a centre analysis (same targets; keeps the fixed 2.5 dB ✓ of the centre analysis).
   - `enum KnobView { Advice(AdviceSet, Option<Positions>), Stored(Vec<Advice>), Entry, Names(String), None }` — the second field of `Advice` is the from-positions (`None` = centre).
   - `fn knob_view(analysis: Option<&Analysis>, editing: bool, saved: Option<&Saved>, mixer: &str, group: &ChannelGroup, goal: &Goal) -> KnobView` — spec rules 1–6.
   - `fn header(v: &KnobView) -> Option<&'static str>` — Advice centre `추천: 가운데(12시)에서 돌릴 양`; Advice entered `추천: 입력한 위치에서 돌릴 양`; Stored `저장된 세팅: 가운데(12시)에서 돌릴 양`; Entry `지금 노브 위치를 믹서 눈금대로 입력하고 [확인]을 누르세요.`; else `None`.
@@ -97,8 +99,8 @@
   - `fn save_positions(a: &Analysis, group: &ChannelGroup) -> Option<Positions>` — `current(a, group)`; `None` disables `이 소리 저장` with hover text `노브 위치를 입력하고 [확인]을 누르면 저장할 수 있습니다.`
   - `fn caption(k: &Advice, from: f32)`, `dial(ui, k, from: f32)`, `knob_row(ui, knobs, from: Option<&Positions>)` — from-value by label (0 when centre or missing). Captions per spec: EQ `Rotate` → [`{시계방향|반시계} {deg}°`, `({db:+.0}dB 눈금으로)`]; COMP `Rotate` → [`왼쪽 끝에서 {from+degrees:.0}°로`]; GAIN unchanged; others unchanged. Dial per spec (pointer at from, arc to target; FREQ ✓ with a known from-FREQ draws a dim pointer there; switch lit when from = 1 or `SwitchOn`; COMP pointer at −150° + from).
 - Flow:
-  - When an as-is analysis finishes and is usable (summary present, rate ≥ `MIN_RATE`, not silent): `editing = Some(prefill(&view_before_this_analysis, group))`, computed before `readvise` replaces the view. Unusable → `editing = None`.
-  - Entry form (in the knob row area): per spec widgets; `확인` → `analysis.entered = editing.take()`, `readvise`. `입력 고치기` next to the entered header → `editing = analysis.entered.clone()`.
+  - When an as-is analysis finishes and is usable (summary present, rate ≥ `MIN_RATE`, not silent): the fill is the open entry form if any, else the fill kept from an unusable as-is analysis, else `prefill(&view_before_this_analysis, group)` (computed before `readvise` replaces the view); `editing = Some(fill)`. Unusable → `editing = None` and the fill is kept for the next analysis (a centre analysis drops it): `entry_after(a, fill) -> (editing, kept)`.
+  - Entry form (in the knob row area): per spec widgets; `확인` sits at the end of the header line, disabled while a MID ≠ 0 has FREQ unknown (`freq_missing`) with hover `FREQ 눈금을 고르세요.`; `확인` → `analysis.entered = editing.take()`, `readvise`. `입력 고치기` next to the entered header → `editing = analysis.entered.clone()`.
   - If `editing` does not `fits` the current group (mixer/group changed), replace it with `prefill` for the current group.
   - The `저장된 노브` line shows under the knob header whenever `saved_line` is `Some`.
   - Save stores `knobs: save_positions(..)`.
