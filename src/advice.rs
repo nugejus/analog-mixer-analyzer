@@ -473,14 +473,18 @@ impl AdviceEngine {
         let gains: Vec<f32> = turn.iter().zip(&eq).map(|(g, &i)| g + k[i].0).collect();
         // 입력한 위치로 복구할 때는 녹음마다 생기는 차이를 쫓지 않습니다: 60·80 Hz LOW와 12 kHz HIGH는 맞춤 대역 몇 개에만
         // 걸려 대역 잡음이 큰 게인 차이가 되므로 ✓ 범위를 그 노브의 잡음 크기까지 넓힙니다(가운데 분석과 보통 모드는 그대로).
-        // 다만 돌릴 양 전체가 잡음 밖이면(d²) 소리가 바뀐 것이라 넓히지 않습니다: FREQ가 LOW·HIGH와 겹치면 둘의 몫만
-        // 불확실해 노브마다의 범위는 10 dB까지 넓지만, 합친 차이는 잡음과 구별됩니다.
+        // 다만 범위 안에 남은 노브들의 돌릴 양을 합친 d²가 잡음 밖이면 소리가 바뀐 것이라 넓히지 않습니다: FREQ가
+        // LOW·HIGH와 겹치면 둘의 몫만 불확실해 노브마다의 범위는 10 dB까지 넓지만, 합친 차이는 잡음과 구별됩니다.
+        // 이미 제 범위를 넘은 노브는 d²에서 빼서, 한 노브가 실제로 바뀌었다고 다른 노브의 범위까지 좁히지 않습니다.
         let release: Vec<f32> = if restore.is_some() && inp.current.is_some_and(|p| fits(group, p)) {
             let cov = gain_cov(&sh);
-            let aug = cov.iter().zip(&turn).map(|(r, &t)| r.iter().copied().chain([t]).collect()).collect();
-            let d2: f32 = turn.iter().zip(solve(aug)).map(|(t, x)| t * x).sum::<f32>() / TAKE_NOISE_DB.powi(2);
-            let changed = d2 > CHI2_999[eq.len()];
-            (0..eq.len()).map(|i| if changed { OK_RELEASE_DB } else { OK_RELEASE_DB.max(NOISE_Z * TAKE_NOISE_DB * cov[i][i].sqrt()) }).collect()
+            let wide: Vec<f32> =
+                (0..eq.len()).map(|i| OK_RELEASE_DB.max(NOISE_Z * TAKE_NOISE_DB * cov[i][i].sqrt())).collect();
+            let q: Vec<usize> = (0..eq.len()).filter(|&i| turn[i].abs() <= wide[i]).collect();
+            let aug = q.iter().map(|&i| q.iter().map(|&j| cov[i][j]).chain([turn[i]]).collect()).collect();
+            let d2: f32 = q.iter().zip(solve(aug)).map(|(&i, x)| turn[i] * x).sum::<f32>() / TAKE_NOISE_DB.powi(2);
+            let changed = d2 > CHI2_999[q.len()];
+            wide.into_iter().map(|w| if changed { OK_RELEASE_DB } else { w }).collect()
         } else {
             vec![OK_RELEASE_DB; eq.len()]
         };
@@ -908,16 +912,24 @@ fn retake(g: &ChannelGroup, k: &Positions, today: impl Fn(f32) -> f32) -> Advice
     }
     for l in ["FREQ", "MID", "LOW 80Hz", "저역컷 100Hz", "COMP"] { assert_eq!(act(&a, l), Action::Ok, "{l}: {:?}", a.knobs); }
 }
+/// 대역마다 ±1 dB인 고정 잡음.
+const NOISE: [f32; 25] = [-1., 1., -1., -1., -1., -1., 1., 1., 1., 1., 1., -1., -1., 1., -1., 1., 1., -1., -1., -1., 1., -1., -1., 1., -1.];
+fn noise(f: f32) -> f32 { NOISE[BANDS_HZ.iter().position(|&b| b == f).unwrap()] }
 #[test] fn take_noise_alone_is_all_ok() {
-    // 대역마다 ±1 dB인 고정 잡음. ✓ 범위가 2.5 dB 고정이던 때는 LOW를 35°(80 Hz), 55°(Signature 12의 60 Hz) 돌리라고 했습니다.
-    const NOISE: [f32; 25] = [-1., 1., -1., -1., -1., -1., 1., 1., 1., 1., 1., -1., -1., 1., -1., 1., 1., -1., -1., -1., 1., -1., -1., 1., -1.];
-    let noise = |f: f32| NOISE[BANDS_HZ.iter().position(|&b| b == f).unwrap()];
+    // ✓ 범위가 2.5 dB 고정이던 때는 LOW를 35°(80 Hz), 55°(Signature 12의 60 Hz) 돌리라고 했습니다.
     let sig = [("저역컷 100Hz", 1.0), ("HIGH 12kHz", 4.0), ("FREQ", 2500.0), ("MID", -4.0), ("LOW 60Hz", -3.0)];
     for (m, set) in [(V3, V3_LABEL), (MixerModel::SoundcraftSignature12, sig)] {
         let g = group(m, 0);
         let a = retake(&g, &pos(&g, &set), noise);
         assert!(a.knobs.iter().filter(|x| x.label != "GAIN").all(|x| x.action == Action::Ok), "{m:?}: {:?}", a.knobs);
     }
+}
+#[test] fn one_real_change_keeps_the_others_in_noise_range() {
+    // HIGH만 6 dB 어두워졌으면 HIGH만 돌리고, 잡음뿐인 LOW는 그대로입니다(d²는 범위 안에 남은 노브끼리).
+    let g = group(V3, 0);
+    let a = retake(&g, &pos(&g, &V3_LABEL), |f| noise(f) - 6.0 * Shape::HighShelf(12_000.0).response(f));
+    assert!(matches!(act(&a, "HIGH 12kHz"), Action::Rotate { degrees, .. } if degrees > 0.0), "{:?}", a.knobs);
+    assert_eq!(act(&a, "LOW 80Hz"), Action::Ok, "{:?}", a.knobs);
 }
 #[test] fn real_low_change_is_still_advised() {
     // LOW를 라벨보다 6 dB 내려 두었으면 시계방향으로 되돌리게 합니다.
