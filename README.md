@@ -1,74 +1,199 @@
-# 믹서 분석기
+# Mixer Analyzer
 
-마이크로 말하는 소리를 녹음해 분석하고, 아날로그 믹서의 어떤 노브를 얼마나 돌릴지 알려 주는 프로그램입니다. 사운드 체크할 때 맞출 채널의 EQ 노브를 가운데(12시)로 돌려 놓고 [분석]을 누른 뒤 평소처럼 말하면 됩니다. 추천은 가운데에서 돌릴 양이고, 그다음 미세 조정은 귀로 합니다.
+Listens to a voice through an analog mixer and tells you which EQ knob on that channel to turn, which way, and how far. Built for church sound checks: set the EQ to 12 o'clock, press **Analyze**, and talk for 20 seconds. You fine-tune by ear after that.
 
-## 설치
-- **Mac**: 화면 왼쪽 위 Apple 메뉴 → **이 Mac에 관하여**에서 칩을 확인합니다. "Apple M…"이면 `MixerAnalyzer-mac-AppleSilicon.zip`, "Intel"이면 `MixerAnalyzer-mac-Intel.zip`을 받아 풀고 `MixerAnalyzer.app`을 응용 프로그램 폴더로 옮깁니다.
-- **Windows**: `MixerAnalyzer-Setup.exe`를 받아 실행하면 설치되고, 시작 메뉴·바탕화면의 **믹서 분석기**로 켭니다. 제거는 설정 → 앱 → **믹서 분석기**. 저장한 세팅은 제거해도 남습니다. 예전 zip 버전을 쓰셨다면 설치 후 옛 `MixerAnalyzer.exe`와 그 바로가기를 지워 주세요. 옛 버전은 새 버전을 확인하지 않습니다.
+<p align="center">
+  <img src="docs/screenshots/main.png" width="860" alt="Mixer Analyzer after a center analysis: the spectrum of a female voice against the dotted target, a red Mud band at 250–500 Hz, and the knob row advising MID at 250 Hz 65° counter-clockwise and LOW 30° clockwise">
+</p>
 
-## 업데이트
-앱을 켤 때 새 버전을 확인해 왼쪽 패널 맨 위에 **새 버전이 있습니다**가 뜹니다. Windows는 **업데이트**를 누르면 받아서 설치 화면을 열고 앱이 닫힙니다(방송 중에는 누르지 마세요). Mac은 **받으러 가기**로 드라이브 폴더를 열어 새 zip으로 앱을 바꿉니다. 인터넷이 없으면 아무것도 뜨지 않습니다. 지금 버전은 왼쪽 패널 맨 아래에 있습니다.
+## Installation
 
-## 첫 실행
-### Mac
-1. 앱을 더블클릭하면 "열 수 없습니다" 같은 경고가 나옵니다. 정상입니다.
-2. **시스템 설정 → 개인정보 보호 및 보안**으로 가서 아래쪽의 **"확인 없이 열기"**를 누릅니다.
-3. 마이크 권한을 물으면 **허용**합니다. 나중에 바꾸려면 시스템 설정 → 개인정보 보호 및 보안 → 마이크에서 합니다. 권한이 꺼져 있으면 소리가 무음으로 들어와서 "입력 신호가 없습니다"가 뜹니다.
+- **macOS:** Apple menu → **About This Mac** shows the chip. Take `MixerAnalyzer-mac-AppleSilicon.zip` for "Apple M…" or `MixerAnalyzer-mac-Intel.zip` for "Intel", unzip it, and move `MixerAnalyzer.app` to Applications.
+- **Windows:** run `MixerAnalyzer-Setup.exe`, then start **Mixer Analyzer** from the Start menu or the desktop. Uninstall in Settings → Apps; saved settings stay. If you used the old zip version, delete the old `MixerAnalyzer.exe` and its shortcut: it never checks for updates.
 
-### Windows
-1. 설치 파일을 처음 실행할 때 "Windows의 PC 보호" 창이 뜨면 **추가 정보 → 실행**을 누릅니다.
-2. 소리가 안 들어오면 설정 → 개인 정보 및 보안 → 마이크에서 앱의 마이크 접근을 켭니다.
+### First launch
 
-## 믹서별 연결
-화면 아래쪽에도 고른 믹서에 맞는 안내가 나옵니다.
-- **Mackie ProFX**: USB로는 메인 믹스만 PC에 갑니다(PFL은 안 감). 맞출 채널만 올리고 다른 채널과 FX는 내리세요. 채널 페이더는 U(0dB)에 두세요.
-- **Mackie 1202/1402/1604VLZ4**: USB가 없습니다. 맞출 채널을 SOLO/PFL하고 CONTROL ROOM(또는 PHONES) 출력을 오디오 인터페이스로 PC에 연결하세요.
-- **Yamaha MGP X**: PC로 가는 USB 오디오가 없습니다. 오디오 인터페이스가 필요합니다. 맞출 채널의 PFL을 켜고 MONITOR OUT L을 인터페이스에 연결하세요. MONITOR 노브는 한 위치에 고정하세요.
-- **Yamaha MG XU**: USB로는 STEREO 버스(채널 페이더 이후)가 갑니다. 맞출 채널만 ST로 보내고 다른 채널은 끄세요. 채널 페이더는 0dB에 두세요.
-- **Yamaha MG06X**: USB가 없습니다. 맞출 채널을 SOLO/PFL하고 CONTROL ROOM(또는 PHONES) 출력을 오디오 인터페이스로 PC에 연결하세요.
-- **Behringer**: USB로는 메인 믹스가 갑니다. 맞출 채널만 올리고 다른 채널과 FX는 내리세요.
-- **Soundcraft Signature**: USB SEND를 MST로 두면 메인 믹스가 갑니다. 맞출 채널만 올리고 다른 채널은 내리세요.
-- **Soundcraft EPM**: USB가 없습니다. 맞출 채널을 SOLO/PFL하고 CONTROL ROOM(또는 PHONES) 출력을 오디오 인터페이스로 PC에 연결하세요.
-- **Allen & Heath ZED**: USB 출력 선택 스위치를 모두 해제하면 메인 L-R이 갑니다. 맞출 채널만 올리고 다른 채널은 내리세요. (ZED-6, ZEDi-8은 USB가 없으니 SOLO/PFL과 오디오 인터페이스를 쓰세요.)
+- **macOS:** the first launch is blocked ("can't be opened"). Open **System Settings → Privacy & Security** and click **Open Anyway**. Allow the microphone when asked; denied, the app gets silence and warns that there is no input.
+- **Windows:** if "Windows protected your PC" appears, click **More info → Run anyway**. If no sound comes in, turn on microphone access in Settings → Privacy & security → Microphone.
 
-## 화면 읽는 법
-- 왼쪽 패널에서 믹서, 채널 그룹, 입력 장치, 분석 채널(1=L, 2=R), 목표와 남성/여성을 고르고, 녹음 시간과 **분석** 버튼, 그래프 설정(실시간 선, 해상도, 주파수 평활, 피크·클리핑 리셋), 저장 폴더도 여기 있습니다. "클리핑 리셋"은 클리핑 횟수를 0으로 되돌립니다.
-- **분석**: "녹음" 슬라이더로 녹음 시간(15–30초, 기본 20초)을 고르고 **분석**을 누르면 먼저 안내창이 뜹니다. 고른 채널에 있는 EQ 노브(HIGH·MID·LOW)는 가운데(12시)로 돌리고, 저역컷은 끄고, COMP는 왼쪽 끝(꺼짐)으로 둡니다. GAIN은 그대로 둡니다. 다 맞췄으면 **가운데로 맞췄어요, 분석**(Enter)을 누르고 녹음이 끝날 때까지 평소처럼 말씀하세요. 이것이 가운데 분석이고, 노브 추천은 가운데에서 돌릴 양입니다. **지금 세팅 그대로 분석**은 노브를 건드리지 않고 지금 소리를 잽니다. 노브를 돌려 둔 채로 분석하거나 세팅을 저장할 때 씁니다. 녹음이 끝나면 노브 줄이 입력 칸으로 바뀌니 지금 노브 위치를 믹서 눈금대로 입력하세요. HIGH·MID·LOW는 가운데에서 dB(−15…15), FREQ는 눈금(MID가 0이 아니면 골라야 **확인**할 수 있음), 저역컷은 `켬`, COMP는 왼쪽 끝에서 각도(5° 단위)이고 GAIN은 입력하지 않습니다. 입력 칸은 분석 직전 노브 줄이 보여 주던 위치로 채워져 있습니다(저장된 세팅이면 그 위치, 추천이 있었으면 추천대로 돌린 위치, 그 밖에는 가운데). 다른 것만 고치고 **확인**을 누르면 입력한 위치에서 돌릴 양이 추천으로 나옵니다. 잘못 입력했으면 머리글 옆 **입력 고치기**로 입력 칸을 다시 엽니다. 믹서나 채널을 바꾸면 입력한 위치는 버리고 입력 칸을 다시 엽니다. 말소리가 부족하거나 샘플레이트가 낮으면 입력 칸 없이 노브 이름과 그 이유만 나오고, 다시 분석하면 입력 칸은 그 분석 전 노브 줄의 위치로 채워집니다. **취소**(Esc)는 창만 닫습니다. 예배 중에는 소리가 바뀌니 사운드 체크 때 하세요. 녹음 중에는 버튼이 **취소**로 바뀝니다. 녹음이 끝나면 한 번 분석하고, 그 결과는 다음 분석까지 그대로 남습니다(녹음 중에도 이전 결과가 보입니다). 믹서, 채널 그룹, 목표, 남성/여성을 바꾸면 다시 녹음하지 않고 저장된 분석으로 추천을 다시 계산합니다.
-- 추천이 나오려면 녹음 중 말하는 소리가 5초 이상 필요합니다. "말소리가 부족합니다"가 보이면 **분석**을 다시 누르고 녹음이 끝날 때까지 말씀하세요.
-- **실시간 주파수 그래프**: 초록 굵은 선이 분석 결과(녹음 평균), 파란 선이 현재 소리, 어두운 회색 선이 피크, 점선이 목표입니다. 초록 선이 점선과 비슷해지도록 맞춥니다. 목표 점선은 분석 결과가 있을 때만 나오고, 100Hz–12.5kHz 대역 대부분에서 분석 결과와 같은 높이가 되도록(차이의 중앙값) 올리거나 내려 그립니다. 그래서 몇몇 대역만 많으면 그 대역이 점선 위로 드러납니다. 점선은 전체 높이를 맞춰 그리므로 크기가 아니라 모양을 비교하는 선입니다(전체 크기는 GAIN 추천과 레벨 기록으로 봅니다).
-- **표시**: 그래프 제목 옆 체크박스로 분석 결과, 현재 소리, 피크, 목표, 노브 구간, 대역 비교, 봉우리 표시를 각각 켜고 끕니다. 체크박스 이름의 색이 그 선의 색입니다. 앱을 다시 켜면 봉우리 표시만 꺼지고 나머지는 켜집니다.
-- **해상도**: 그래프를 얼마나 촘촘하게 그릴지 고릅니다(1/12, 1/24, 1/48, 1/96옥타브, 기본 1/48). 숫자가 클수록 촘촘합니다. 바꿔도 다시 녹음할 필요가 없고 노브 추천도 그대로입니다(파란 선과 피크 선만 새로 시작합니다).
-- **주파수 평활**: 선을 주변 1/N옥타브 평균으로 매끄럽게 합니다(없음, 1/24, 1/12, 1/6, 1/3옥타브, 기본 1/6). 세게 할수록 좁은 봉우리가 낮게 보입니다. 해상도보다 좁은 평활은 해상도에 맞춰 넓힙니다(평활 폭은 점 간격의 두 배 이상: 1/12옥타브 해상도에서는 1/24·1/12가 1/6로, 1/24에서는 1/24가 1/12로). 점 사이에 있는 소리가 빠지지 않게 하려는 것입니다. 노브 추천에는 영향이 없고, 바꾸면 파란 선과 피크 선이 새로 시작합니다.
-- **노브 구간**: 그래프 위쪽의 가로 막대는 고른 채널의 EQ 노브가 맡는 주파수 구간입니다. 이름은 아래 노브 이름과 같습니다. FREQ를 돌릴 수 있는 MID는 돌릴 수 있는 범위 전체가 막대이고, 분석이 FREQ 눈금을 추천하면 그 자리에 노란 세로선과 노란 막대가 나옵니다.
-- **대역 비교**: 분석 결과를 높이를 맞춘 목표 점선(또는 저장한 소리)과 8개 구간으로 비교합니다. 웅웅거림 80–250Hz, 먹먹함 250–500Hz, 통 울림 500–800Hz, 비음 800–1500Hz, 까랑함 1.5–3kHz, 쏘는 소리 3–5kHz, 치찰음 5–10kHz, 공기감 10–20kHz입니다. 목표보다 3 dB 이상 많으면 빨강, 3 dB 이상 적으면 파랑 띠가 깔리고 구간 이름과 차이(dB)가 그래프 아래쪽에 나옵니다. 2.4–3.6kHz처럼 좋은 울림도 있는 대역이라 좋고 나쁨이 아니라 목표 대비로 봅니다. 치찰음처럼 순간적인 소리는 평균에는 덜 보입니다. 분석 결과가 있을 때만 나옵니다.
-- **봉우리 표시**: 분석 결과 선이 켜져 있을 때, 그 곡선에서 주변 1옥타브 평균보다 3 dB 이상 좁게 튀는 곳을 큰 순서로 최대 5개, ▼와 `892Hz +4dB` 같은 라벨로 표시합니다(100Hz–10kHz). 원래 목소리의 울림(포먼트)에도 붙으니 대역 비교와 함께 보세요. 넓게 올라간 대역은 잡지 않고, 하울링은 하울링 표시로 봅니다. 분석 결과가 있을 때만 나옵니다.
-- "실시간 선"은 파란 선이 소리를 따라가는 속도입니다(빠름 0.3초 / 보통 1초 / 느림 3초). 피크 선은 떨어지지 않고, "피크 리셋"을 누르거나 분석을 시작할 때만 지워집니다.
-- **레벨/디스토션 기록**: 최근 30초의 피크입니다. 빨간 점은 클리핑(소리가 찌그러진 지점)입니다. 아래 줄에 피크, 클리핑 횟수, 과부하 의심, 하울링 의심이 나옵니다. 과부하 의심은 마지막 분석 결과이며 다음 분석까지 그대로입니다(피크·클리핑·하울링은 실시간).
-- **노브 추천**: 노브마다 다이얼 그림과 "시계방향 30°" 같은 회전량, "(+3dB 눈금으로)"처럼 돌린 뒤의 눈금이 나옵니다. 가운데 분석이면 가운데(12시)에서, 그대로 분석이면 입력한 위치에서 돌릴 양입니다(GAIN은 지금 위치에서). COMP는 "왼쪽 끝에서 30°로"처럼 왼쪽 끝에서 잰 목표 각도입니다. 각도는 "느낌" 정도의 정확도입니다. 다이얼의 바늘은 지금 위치, 노란 호는 목표까지입니다. 노브 줄 머리글이 `추천: 가운데(12시)에서 돌릴 양`(가운데 분석), `추천: 입력한 위치에서 돌릴 양`(그대로 분석), `저장된 세팅` 중 무엇인지 알려 줍니다. "✓"는 지금 위치 그대로 두라는 뜻입니다(가운데 분석이면 가운데, 저역컷·COMP는 꺼짐). 그다음 미세 조정은 귀로 합니다. 그래프의 대역 비교에서 빨간 구간에 있는 노브는 올리라고 하지 않고, 파란 구간에 있는 노브는 깎으라고 하지 않습니다. HIGH는 최대 +6dB까지만 올리라고 합니다(저장한 세팅 복구 때는 제외).
-- 맨 아래 안내 줄에 연결 팁, 잡음, 하울링 안내가 나옵니다.
+### Updates
 
-### 목표
-- **목표** 메뉴는 분류별로 나뉩니다. `기본 · 자연스러운 목소리`(처음 값)는 목소리를 있는 그대로 자연스럽게 맞춥니다. `찬양인도자`, `설교자`, `보조보컬` 아래에는 교회 음향에서 알려진 보컬 EQ 세팅이 있고, 메뉴 옆에 언제 쓰는 세팅인지 나옵니다.
-- 세팅은 지금 목소리와 마이크를 보고 추천합니다. 이미 밝은 목소리면 HIGH를 더 올리라고 하지 않습니다.
-- 남성/여성은 바탕이 되는 목소리입니다. 기본과 추천 세팅에 쓰이고, 저장한 세팅을 고르면 꺼집니다.
-- 고른 채널에 그 세팅이 바꾸는 노브(저역컷 스위치 포함)가 없으면 안내 줄에 "그 부분은 빼고 맞춥니다"가 나옵니다.
+At launch the app checks for a new version and shows **New version available** at the top of the left panel. Nothing shows when offline.
+- Windows: **Update** downloads the installer, opens it and closes the app. Not during a service.
+- macOS: **Download** opens the download folder; replace the app with the new zip.
 
-### 세팅 저장과 복구
-저장한 세팅은 소리(주파수)와 그때 입력한 노브 위치(믹서 눈금)를 함께 갖습니다. 노브 위치는 같은 믹서·채널이면 분석 없이 바로 맞출 수 있고, 소리는 오늘 소리와 비교해 남은 조정을 알려 줍니다.
-- **저장**(잘 아는 분): ① 노브를 가운데로 맞추고 **분석** → **가운데로 맞췄어요, 분석**(노브 눈금을 읽을 수 있으면 **지금 세팅 그대로 분석** 뒤 노브 위치를 입력해도 됩니다) ② 추천대로 돌리고 귀로 다듬기 ③ **분석** → **지금 세팅 그대로 분석** → 녹음이 끝나면 노브 위치 입력(추천대로 채워져 있으니 귀로 바꾼 것만 고침) → **확인** ④ **이 소리 저장**. 이름(예: 홍길동 목사님 설교 마이크)을 적고 **저장**을 누릅니다. 말인지 노래인지, 반주가 있었는지도 이름에 적어 두세요. 같은 이름으로 저장하면 덮어씁니다. 그대로 분석 뒤 **확인**을 누르기 전에는 저장할 수 없습니다. 가운데 분석 바로 뒤에 저장하면 노브 위치는 모두 가운데로 저장됩니다.
-- **복구**(봉사자): 목표에서 `저장한 세팅 · 이름`을 고릅니다.
-  - 저장할 때와 같은 믹서·채널이면 노브 줄 머리글 아래에 `저장된 노브: 저역컷 켬 · HIGH 12kHz +6dB · FREQ 800Hz · MID -6dB · …` 줄이 나옵니다. 이 줄대로 맞추면 됩니다. 분석도 말하는 사람도 필요 없어서 예배 전에 미리 맞추거나 예배 중 누가 노브를 건드렸을 때 씁니다. 앱을 켠 뒤 아직 분석하지 않았으면 노브 줄에도 저장된 위치가 가운데에서 돌릴 양으로 나오지만, 분석을 한 번이라도 했으면 노브 줄은 그 분석의 추천이니 `저장된 노브` 줄을 보세요.
-  - 그 위치로 맞춘 다음, 저장한 그 사람이 말할 때 **분석** → **지금 세팅 그대로 분석** → 입력 칸이 `저장된 노브` 줄과 같은지 보고(노브 줄이 저장된 위치를 보여 주던 때면 그대로 채워져 있음) **확인**을 누릅니다. 오늘 소리와 저장한 소리의 차이로 남은 조정만 그 위치에서 돌릴 양으로 나옵니다. 모두 ✓면 그대로 두면 됩니다. 녹음마다 생기는 만큼의 차이(믹서와 FREQ에 따라 LOW는 3–8 dB, Signature에서 MID를 160 Hz 이하에 두면 10 dB 남짓, HIGH는 3–5 dB쯤까지)는 ✓로 두니 그 안의 조정은 귀로 하세요. LOW는 돌리라는 양도 실제보다 크게 나올 수 있으니 돌린 뒤 저역을 귀로 확인하세요. 노브를 건드리지 않았는데 하나를 돌리라고 하면(드뭅니다) 한 번 더 그대로 분석해(입력 칸은 지금 노브 위치로 고쳐서) 같은 방향으로 또 나올 때만 돌리세요.
-  - 노브를 읽기 어렵거나 믹서가 바뀌었으면 가운데로 맞추고 분석해도 됩니다. 추천대로 돌리면 저장할 때의 소리로 돌아갑니다. 믹서나 채널이 다르면 안내 줄에 알려 줍니다.
-  - 저역컷은 끄라고 하지 않습니다. 꺼져 있을 때 `켜기 권장`만 나옵니다.
-  - GAIN은 그날 말하는 크기에 따라 달라서 복구하지 않습니다(클리핑과 너무 작은 소리만 알려 줍니다).
-  - COMP도 줄이라고 하지 않습니다. 소리 크기의 오르내림이 저장할 때보다 크면 왼쪽 끝에서 30°까지 돌리라고만 합니다(이미 30° 이상이면 ✓).
-  - 0.4.0 이하에서 저장한 세팅은 노브 위치가 없어 소리로만 복구합니다.
-- **삭제**: 저장한 세팅을 고른 동안 **삭제**가 보입니다. 한 번 누르면 **정말 삭제**로 바뀌고, 한 번 더 누르면 지워집니다. 목표를 바꾸면 취소됩니다.
-- **저장 폴더**: 저장한 세팅은 저장 폴더의 `saved.tsv` 파일에 들어갑니다. 왼쪽 패널 아래 **저장 폴더**의 **찾아보기…**로 폴더를 고르면 그 폴더를 씁니다(다시 켜도 기억). 저장본이 있는 폴더면 그 목록을 읽고, 빈 폴더면 지금 목록을 그 폴더에 복사해 씁니다(이전 폴더의 파일은 그대로 남습니다). **폴더 열기**는 Finder/탐색기로 열고, **읽기**는 파일을 다시 읽고, **쓰기**는 지금 목록으로 파일을 덮어씁니다. 기본 폴더는 Mac `~/Library/Application Support/MixerAnalyzer`(Finder **이동** 메뉴에서 Option 키를 누르면 **라이브러리**가 보입니다), Windows `%APPDATA%\MixerAnalyzer`입니다. 읽거나 저장하지 못하면 안내 줄에 빨간 글씨로 나오고, 읽지 못한 파일은 **쓰기**를 누르기 전에는 덮어쓰지 않습니다.
-- 저장 폴더를 여러 PC가 함께 쓰면 모두 0.5.0 이상으로 맞추세요. 0.3.2와 0.4.0은 노브 위치를 함께 저장한 줄을 읽지 못해 저장·삭제를 막습니다(그 PC에서 **쓰기**를 누르면 그 줄이 지워집니다). 0.3.1 이하는 새 버전에서 저장한 소리를 읽지 못하고, 그 PC에서 저장·삭제·쓰기를 하면 그 소리가 지워집니다.
-- 저장할 때 **채널 스트립 사진도 찍어 두세요.** 노브 위치를 그대로 볼 수 있어서 복구할 때 함께 보면 좋습니다.
+The running version is at the bottom of the left panel.
 
-## 라이선스 고지
-- 글꼴 Pretendard Regular: SIL Open Font License 1.1 (설치 폴더나 zip의 `Pretendard-LICENSE.txt` 참고).
-- 색상 Catppuccin Mocha: MIT License, Copyright (c) 2021 Catppuccin.
+### Language
+
+The app starts in English. **English** / **한국어** at the bottom of the left panel switches it, and the choice is remembered. Saved settings work in either language.
+
+## Connecting the mixer
+
+The app hears whatever reaches the computer. Send it the one channel you are setting up. The tip for the picked mixer also shows at the bottom of the window.
+
+| Mixer | Connection |
+|---|---|
+| Mackie ProFX | USB carries the main mix only (not PFL). Raise only that channel, pull the other channels and FX down, channel fader at U (0 dB). |
+| Mackie 1202/1402/1604VLZ4, Yamaha MG06X, Soundcraft EPM | No USB. SOLO/PFL the channel and send CONTROL ROOM (or PHONES) to the computer through an audio interface. |
+| Yamaha MGP X | No USB audio to the computer. PFL the channel, send MONITOR OUT L to an audio interface, and leave the MONITOR knob in one place. |
+| Yamaha MG XU | USB carries the STEREO bus, after the fader. Send only that channel to ST, the others off, fader at 0 dB. |
+| Behringer | USB carries the main mix. Raise only that channel, other channels and FX down. |
+| Soundcraft Signature | Set USB SEND to MST for the main mix. Raise only that channel. |
+| Allen & Heath ZED | Release every USB source switch for the main L-R. Raise only that channel. ZED-6 and ZEDi-8 have no USB: use SOLO/PFL and an audio interface. |
+
+## Usage
+
+1. In the left panel pick the **Mixer**, **Channel** group, **Input** device, **Analysis channel** (1 = L, 2 = R), **Target** and **Male** / **Female** voice.
+2. Press **Analyze**. A dialog lists the knobs this channel has:
+
+   <p align="center">
+     <img src="docs/screenshots/dialog.png" width="380" alt="The Before you analyze dialog: HIGH, MID and LOW to 12 o'clock, low cut off, COMP fully left, GAIN as is, with the buttons Centered, analyze / Analyze as set / Cancel">
+   </p>
+
+   Turn HIGH, MID and LOW to 12 o'clock, the low cut off and COMP fully left (off). Leave GAIN. Then press **Centered, analyze** or `Enter`. **Cancel** or `Esc` closes the dialog.
+3. Talk as usual until the recording ends. The **Record** slider sets its length: 15–30 s, 20 s by default. Meanwhile the button turns into **Cancel**.
+4. Turn each knob as the knob row says, then fine-tune by ear.
+
+The analysis needs at least 5 s of speech; if there wasn't enough, the notes say so: press **Analyze** again and keep talking. Do it at the sound check: during the service the sound keeps changing.
+
+The result stays until the next analysis, and the previous one stays visible while recording. Changing the mixer, channel group, target or voice recomputes the advice from it without recording again.
+
+### Knob row
+
+Each knob gets a dial and a caption. The needle is where the knob is, the yellow arc where to turn it.
+
+| Caption | Meaning |
+|---|---|
+| `30° CW` / `65° CCW` | Turn 30° clockwise / 65° counter-clockwise |
+| `(to +3 dB)` | That lands on the +3 dB mark |
+| `Set 250Hz` | Set FREQ to the 250 Hz mark |
+| `To 30° from left` | COMP: turn to 30° from the left end |
+| `Turn on` | Turn the low cut on |
+| `✓` / `✓ keep` | Leave it where it is |
+
+- After a center analysis the turns are from 12 o'clock; after an as-set analysis, from the positions you entered (see [Analyzing as set](#analyzing-as-set)). GAIN is always from where it is now. The header says which.
+- Angles are a feel, not a measurement.
+- A knob never boosts inside a red band of the graph, or cuts inside a blue one.
+- HIGH is never boosted past +6 dB, except when restoring a saved setting.
+
+### Graph
+
+| Line | Meaning |
+|---|---|
+| Green, thick | **Analysis**: averaged over the recording |
+| Blue | **Live**: the sound now |
+| Dark gray | **Peak**: it never falls; **Reset peak** or a new analysis clears it |
+| Dotted | **Target**: shifted to sit on the analysis over most of 100 Hz–12.5 kHz. Compare shapes, not heights; overall level is GAIN's job |
+
+Bring the green line to the dotted one. The checkboxes beside **Show** turn each layer on and off; their color is the line's color. **Peaks** starts off at every launch, the rest on.
+
+- **Knob ranges**: bars along the top show the range each EQ knob covers. A sweepable MID covers its whole FREQ range; the advised FREQ gets a yellow line and bar.
+- **Band check**: the analysis against the target in eight bands. A band 3 dB or more over the target is red, 3 dB or more under is blue, with its name and difference along the bottom. Read it against the target, not as good or bad: 2.4–3.6 kHz, for one, holds presence as well as harshness.
+
+  | Boom | Mud | Boxy | Nasal | Harsh | Sharp | Sibilance | Air |
+  |---|---|---|---|---|---|---|---|
+  | 80–250 Hz | 250–500 Hz | 500–800 Hz | 800–1.5k | 1.5–3k | 3–5k | 5–10k | 10–20k |
+
+- **Peaks**: up to 5 narrow peaks between 100 Hz and 10 kHz that stand 3 dB or more over their 1-octave surroundings, marked `▼ 892Hz +4dB`. The voice's own formants get marked too, so read them with the band check. Feedback has its own warning.
+
+Graph settings in the left panel change only the drawing; they never need a new recording or change the advice:
+- **Live line**: how fast the blue line follows, 0.3 / 1 / 3 s.
+- **Resolution**: 1/12, 1/24, 1/48 or 1/96 octave; 1/48 by default.
+- **Smoothing**: off, 1/24, 1/12, 1/6 or 1/3 octave; 1/6 by default. Stronger smoothing lowers narrow peaks. Smoothing narrower than two points of the resolution is widened.
+
+Below the graph, **Level / distortion** shows the last 30 s of peaks, with clipping as red dots. The line under it shows the peak, the clip count (**Reset clips** zeroes it), suspected overload from the last analysis, and suspected feedback, live. The **Notes** at the bottom carry connection tips and noise and feedback warnings.
+
+### Targets
+
+The **Target** menu has groups:
+- `Default · Natural voice`: the voice as it is, natural.
+- `Worship leader`, `Preacher`, `Backing vocal`: known church vocal EQ settings. The line under the menu says when each one fits.
+
+The advice starts from this voice through this mic: an already bright voice isn't told to add HIGH. **Male** / **Female** picks the base voice for the default and the presets. If the channel lacks a knob a preset needs, the notes say that part is left out.
+
+## Analyzing as set
+
+**Analyze as set** in the dialog records without touching the knobs. Use it when the knobs are already turned, or to save a setting. When the recording ends, the knob row turns into fields. Enter the knobs as the mixer's markings read, then press **OK**:
+
+<p align="center">
+  <img src="docs/screenshots/entry.png" width="730" alt="The knob row as fields: low cut off, HIGH 0dB, FREQ 250Hz, MID -7dB, LOW 3dB, COMP 0° from left, and the OK button in the header">
+</p>
+
+| Knob | Enter |
+|---|---|
+| HIGH, MID, LOW | dB from center, −15 to 15 |
+| FREQ | The mark. Required while MID isn't 0 |
+| Low cut | **on** |
+| COMP | Degrees from the left end, in 5° steps |
+| GAIN | Not entered |
+
+- The fields start where the knob row last pointed: the saved setting, the advised positions, or center. Fix only what differs.
+- After **OK** the advice is turns from the entered positions. **Edit entry** in the header reopens the fields.
+- Changing the mixer or channel group drops the entry and reopens the fields.
+- With too little speech or a low sample rate there are no fields, just the knob names and the reason. The next as-set analysis starts from the same fill.
+
+## Saving and restoring
+
+A saved setting holds the sound (its spectrum) and the knob positions entered with it. The positions let you set the same mixer and channel straight away; the sound tells what's left to adjust today.
+
+**Save** (someone who knows the sound):
+1. Center the knobs, press **Analyze** → **Centered, analyze**. If you can read the knobs, an as-set analysis with the positions entered works too.
+2. Turn as advised and refine by ear.
+3. **Analyze** → **Analyze as set**. The fields start at the advised positions; fix what you changed by ear, then **OK**.
+4. **Save this sound**, type a name, **Save**. Put speech or singing, and any accompaniment, in the name. The same name overwrites.
+
+Saving is blocked between an as-set analysis and its **OK**. Saving right after a center analysis stores every knob at center.
+
+**Restore** (a volunteer):
+1. Pick `Saved · <name>` in **Target**.
+2. On the same mixer and channel, the line `Saved knobs: …` under the knob row header lists every knob that isn't at center. Set them. This needs no analysis and no speaker, so it works before the service or after someone bumped a knob. Before the first analysis the knob row shows the same positions as turns from center; after one it shows that analysis, so go by the `Saved knobs` line.
+3. While the same person talks: **Analyze** → **Analyze as set**, check the fields match the `Saved knobs` line, **OK**. Only what's left to adjust shows, as turns from there. All ✓ means done.
+
+<p align="center">
+  <img src="docs/screenshots/restore.png" width="730" alt="A restore: the Saved knobs line reads FREQ 250Hz · MID -7dB · LOW 80Hz +3dB, and every knob below shows ✓">
+</p>
+
+- Each recording differs a little. Differences that size stay ✓: LOW 3–8 dB depending on the mixer and FREQ (about 10 dB on a Signature with MID at 160 Hz or lower), HIGH up to 3–5 dB. Adjust within that by ear.
+- A LOW turn may come out larger than needed; check the lows by ear after turning.
+- If one knob is flagged though nobody touched it (rare), analyze as set once more, with the fields fixed to where the knobs are, and turn only if it comes back the same way.
+- Can't read the knobs, or a different mixer? A center analysis works too: turning as advised brings back the saved sound. The notes say when the mixer or channel differs.
+- The low cut is never advised off, only `Turn on` when it is off.
+- GAIN isn't restored; it depends on how loud the person is that day. Only clipping and a too-quiet signal are flagged.
+- COMP is never advised down. If the loudness swings more than when saved, it says to turn it to 30° from the left end (✓ if it is already there or further).
+- Settings saved by 0.4.0 or older have no positions; they restore by sound only.
+- Take a photo of the channel strip when saving.
+
+**Delete** shows while a saved setting is picked. It turns into **Really delete**; press again to delete. Changing the target cancels.
+
+### Save folder
+
+Settings live in `saved.tsv` in the save folder, set under **Save folder** in the left panel:
+- **Browse…** picks a folder, remembered across launches. A folder with a `saved.tsv` is read; in an empty one the current list is copied in. The old folder's file stays.
+- **Open folder** opens it in Finder or Explorer. **Read** reads the file again. **Write** overwrites it with the current list.
+- Default: `~/Library/Application Support/MixerAnalyzer` on macOS (in Finder's **Go** menu, hold Option for **Library**), `%APPDATA%\MixerAnalyzer` on Windows.
+- Errors show in red in the notes. A file that couldn't be read is never overwritten until you press **Write**.
+
+When several computers share the folder, run the latest version on all of them. Settings saved by older, Korean-language versions are read and keep working.
+- 0.5.0 and older can't match settings saved by newer versions to their mixer: no saved knobs, and a note that the mixer differs.
+- 0.3.2 and 0.4.0 can't read lines with knob positions and refuse to save or delete. **Write** there drops those lines.
+- 0.3.1 and older can't read sounds saved by newer versions. Saving, deleting or **Write** there erases them.
+
+## Building
+
+Rust 1.96 (pinned in `rust-toolchain.toml`).
+
+```bash
+cargo run --release              # run from source
+cargo run --release -- --demo    # Demo signal: a synthetic voice instead of a microphone
+cargo test
+scripts/build-mac.sh             # dist/MixerAnalyzer-mac-{AppleSilicon,Intel}.zip
+scripts/build-win.sh             # dist/MixerAnalyzer-Setup.exe and dist/latest.txt
+```
+
+`build-win.sh` cross-compiles from macOS: it needs `cargo-xwin`, Homebrew `llvm` and `makensis`. `latest.txt` is the update feed: the version on the first line, the installer's download link on the second.
+
+## License notices
+
+- Font Pretendard Regular: SIL Open Font License 1.1 (`Pretendard-LICENSE.txt` in the install folder or the zip).
+- Colors Catppuccin Mocha: MIT License, Copyright (c) 2021 Catppuccin.

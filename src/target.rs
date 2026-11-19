@@ -1,4 +1,5 @@
 use crate::advice::Shape;
+use crate::lang::L;
 use crate::mixers::{ChannelGroup, Control};
 
 pub const BANDS_HZ: [f32; 25] = [
@@ -13,7 +14,7 @@ pub enum Voice {
     Female,
 }
 
-/// 2차 하이패스(12 dB/옥타브) 응답: −10·log10(1 + (fc/f)^4).
+/// 2nd-order high-pass (12 dB/octave) response: −10·log10(1 + (fc/f)^4).
 pub fn hpf_db(fc: f32, hz: f32) -> f32 {
     -10.0 * (1.0 + (fc / hz).powi(4)).log10()
 }
@@ -21,7 +22,7 @@ pub fn hpf_db(fc: f32, hz: f32) -> f32 {
 /// Half-width in octaves of a Bell (sigma 0.6 octave).
 pub const BELL_OCT: f32 = 0.7;
 
-/// 세팅 표의 EQ 변화: (hz, gain_db, width_oct). Bell 폭 0이면 σ = 0.6옥타브.
+/// EQ change from the settings table: (hz, gain_db, width_oct). With Bell width 0, σ = 0.6 octave.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Move {
     Hpf(f32),
@@ -31,48 +32,48 @@ pub enum Move {
 }
 
 pub struct Preset {
-    pub category: &'static str,
-    pub name: &'static str,
-    pub when: &'static str,
+    pub category: L,
+    pub name: L,
+    pub when: L,
     pub moves: &'static [Move],
 }
 
-/// spec "세팅 표". 0번 = 기본.
+/// spec "Settings table". Index 0 = default.
 pub const PRESETS: [Preset; 6] = [
-    Preset { category: "기본", name: "자연스러운 목소리", when: "목소리를 있는 그대로 자연스럽게 맞춥니다.", moves: &[] },
+    Preset { category: L("Default", "기본"), name: L("Natural voice", "자연스러운 목소리"), when: L("Keeps the voice natural, as it is.", "목소리를 있는 그대로 자연스럽게 맞춥니다."), moves: &[] },
     Preset {
-        category: "찬양인도자",
-        name: "또렷한 찬양 인도",
-        when: "밴드 소리에 인도자 목소리가 묻히고 가사가 잘 안 들릴 때",
+        category: L("Worship leader", "찬양인도자"),
+        name: L("Clear lead", "또렷한 찬양 인도"),
+        when: L("When the band buries the leader's voice and the lyrics are hard to hear", "밴드 소리에 인도자 목소리가 묻히고 가사가 잘 안 들릴 때"),
         moves: &[Move::Hpf(100.0), Move::Bell(4000.0, 3.0, 0.0), Move::HighShelf(10000.0, 2.5)],
     },
     Preset {
-        category: "찬양인도자",
-        name: "가벼운 찬양 인도",
-        when: "밴드와 섞일 때 목소리가 두껍고 웅웅거릴 때(특히 남성 인도자)",
+        category: L("Worship leader", "찬양인도자"),
+        name: L("Lighter lead", "가벼운 찬양 인도"),
+        when: L("When the voice sounds thick and boomy in the band mix (especially male leaders)", "밴드와 섞일 때 목소리가 두껍고 웅웅거릴 때(특히 남성 인도자)"),
         moves: &[Move::Hpf(100.0), Move::Bell(300.0, -4.5, 0.0), Move::HighShelf(10000.0, 2.5)],
     },
     Preset {
-        category: "설교자",
-        name: "명료한 설교",
-        when: "설교 말씀을 더 또렷하게 들리게 하고 싶을 때",
+        category: L("Preacher", "설교자"),
+        name: L("Clear sermon", "명료한 설교"),
+        when: L("When you want the sermon to come through more clearly", "설교 말씀을 더 또렷하게 들리게 하고 싶을 때"),
         moves: &[Move::Hpf(100.0), Move::Bell(3000.0, 4.0, 0.0)],
     },
     Preset {
-        category: "보조보컬",
-        name: "리드 뒤로",
-        when: "보조보컬이 인도자와 겹쳐 같이 앞으로 튀어나올 때",
+        category: L("Backing vocal", "보조보컬"),
+        name: L("Behind the lead", "리드 뒤로"),
+        when: L("When a backing vocal competes with the leader and jumps out front", "보조보컬이 인도자와 겹쳐 같이 앞으로 튀어나올 때"),
         moves: &[Move::Hpf(100.0), Move::Bell(3750.0, -3.0, 0.0)],
     },
     Preset {
-        category: "보조보컬",
-        name: "남성 보조보컬",
-        when: "남성 보조보컬의 저음이 두꺼워 인도자나 악기를 덮을 때",
+        category: L("Backing vocal", "보조보컬"),
+        name: L("Male backing", "남성 보조보컬"),
+        when: L("When a male backing vocal's thick low end covers the leader or the instruments", "남성 보조보컬의 저음이 두꺼워 인도자나 악기를 덮을 때"),
         moves: &[Move::Hpf(135.0), Move::Bell(300.0, -4.5, 0.0)],
     },
 ];
 
-/// `m`이 `hz`에서 바꾸는 dB.
+/// dB that `m` changes at `hz`.
 pub fn move_db(m: &Move, hz: f32) -> f32 {
     match *m {
         Move::Hpf(fc) => hpf_db(fc, hz),
@@ -85,7 +86,7 @@ pub fn move_db(m: &Move, hz: f32) -> f32 {
     }
 }
 
-/// LTASS + 세팅의 move. hpf는 그룹의 저역컷 스위치 hz로 바꾸고, 맡을 노브가 없는 move(스위치 없는 hpf 포함)는 빼서 그 hz를 돌려줍니다.
+/// LTASS + the setting's moves. hpf is changed to the group's low-cut switch hz; moves with no knob to handle them (including hpf with no switch) are removed and their hz returned.
 pub fn preset_target(p: &Preset, voice: Voice, group: &ChannelGroup) -> ([f32; 25], Vec<f32>) {
     let ctl = &group.controls;
     let cut = ctl.iter().find_map(|&c| match c {
@@ -121,15 +122,15 @@ pub fn preset_target(p: &Preset, voice: Voice, group: &ChannelGroup) -> ([f32; 2
 }
 
 /// Tone-colour ranges (name, lo Hz, hi Hz); a third-octave centre in [lo, hi) belongs to it.
-pub const TONE_BANDS: [(&str, f32, f32); 8] = [
-    ("웅웅거림", 80.0, 250.0),
-    ("먹먹함", 250.0, 500.0),
-    ("통 울림", 500.0, 800.0),
-    ("비음", 800.0, 1500.0),
-    ("까랑함", 1500.0, 3000.0),
-    ("쏘는 소리", 3000.0, 5000.0),
-    ("치찰음", 5000.0, 10000.0),
-    ("공기감", 10000.0, 20000.0),
+pub const TONE_BANDS: [(L, f32, f32); 8] = [
+    (L("Boom", "웅웅거림"), 80.0, 250.0),
+    (L("Mud", "먹먹함"), 250.0, 500.0),
+    (L("Boxy", "통 울림"), 500.0, 800.0),
+    (L("Nasal", "비음"), 800.0, 1500.0),
+    (L("Harsh", "까랑함"), 1500.0, 3000.0),
+    (L("Sharp", "쏘는 소리"), 3000.0, 5000.0),
+    (L("Sibilance", "치찰음"), 5000.0, 10000.0),
+    (L("Air", "공기감"), 10000.0, 20000.0),
 ];
 
 /// A tone band this far above (red) or below (blue) the reference is flagged on the graph.
@@ -177,10 +178,10 @@ mod tests {
     use crate::mixers::{MixerFactory, MixerModel};
     fn g(m: MixerModel) -> crate::mixers::ChannelGroup { MixerFactory::create(m).groups.remove(0) }
     #[test] fn preset_table_matches_spec() {
-        let c: Vec<_> = PRESETS.iter().map(|p| p.category).collect();
-        assert_eq!(c, ["기본", "찬양인도자", "찬양인도자", "설교자", "보조보컬", "보조보컬"]);
-        let n: Vec<_> = PRESETS.iter().map(|p| p.name).collect();
-        assert_eq!(n, ["자연스러운 목소리", "또렷한 찬양 인도", "가벼운 찬양 인도", "명료한 설교", "리드 뒤로", "남성 보조보컬"]);
+        let c: Vec<_> = PRESETS.iter().map(|p| p.category.get()).collect();
+        assert_eq!(c, ["Default", "Worship leader", "Worship leader", "Preacher", "Backing vocal", "Backing vocal"]);
+        let n: Vec<_> = PRESETS.iter().map(|p| p.name.get()).collect();
+        assert_eq!(n, ["Natural voice", "Clear lead", "Lighter lead", "Clear sermon", "Behind the lead", "Male backing"]);
         assert_eq!(PRESETS[1].moves, [Move::Hpf(100.0), Move::Bell(4000.0, 3.0, 0.0), Move::HighShelf(10000.0, 2.5)]);
         assert_eq!(PRESETS[5].moves, [Move::Hpf(135.0), Move::Bell(300.0, -4.5, 0.0)]);
     }
@@ -201,7 +202,7 @@ mod tests {
         assert!((t[0] - want).abs() < 1e-4);
     }
     #[test] fn hpf_dropped_without_switch() {
-        // 스위치가 없으면 LOW가 저역컷을 흉내 내며 크게 깎지 않게 뺍니다.
+        // With no switch, remove it so LOW does not mimic the low cut and cut hard.
         let (t, dropped) = preset_target(&PRESETS[3], Voice::Male, &g(MixerModel::SoundcraftEpm));
         let want: [f32; 25] = std::array::from_fn(|i| ltass_db(Voice::Male)[i] + move_db(&Move::Bell(3000.0, 4.0, 0.0), BANDS_HZ[i]));
         assert!(t.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-4) && dropped == [100.0], "{t:?} {dropped:?}");
@@ -210,10 +211,10 @@ mod tests {
     }
     #[test] fn moves_without_knob_are_dropped() {
         let dropped = |i: usize, m| preset_target(&PRESETS[i], Voice::Male, &g(m)).1;
-        assert_eq!(dropped(2, MixerModel::MackieProFx12v3), [300.0]); // 고정 MID 2.5k
-        assert_eq!(dropped(4, MixerModel::MackieProFx12v3), Vec::<f32>::new()); // 3750은 0.7옥타브 안
-        assert_eq!(dropped(3, MixerModel::AhZedi10), [3000.0]); // 고정 MID 600
-        assert_eq!(dropped(4, MixerModel::YamahaMg06x), [3750.0]); // MID 없음
+        assert_eq!(dropped(2, MixerModel::MackieProFx12v3), [300.0]); // fixed MID 2.5k
+        assert_eq!(dropped(4, MixerModel::MackieProFx12v3), Vec::<f32>::new()); // 3750 is within 0.7 octave
+        assert_eq!(dropped(3, MixerModel::AhZedi10), [3000.0]); // fixed MID 600
+        assert_eq!(dropped(4, MixerModel::YamahaMg06x), [3750.0]); // no MID
         assert_eq!(dropped(2, MixerModel::MackieProFx22v3), Vec::<f32>::new());
         let (t, _) = preset_target(&PRESETS[2], Voice::Male, &g(MixerModel::MackieProFx12v3));
         let want = ltass_db(Voice::Male)[7] + hpf_db(100.0, 315.0) + move_db(&Move::HighShelf(10000.0, 2.5), 315.0);
@@ -261,9 +262,9 @@ mod tests {
     fn tone_excess_follows_reference_level() {
         let reference = [-40.0f32; 25];
         let mut m = reference;
-        m[14..=16].iter_mut().for_each(|v| *v += 6.0); // 1600, 2000, 2500 = 까랑함
+        m[14..=16].iter_mut().for_each(|v| *v += 6.0); // 1600, 2000, 2500 = harshness
         let e = tone_excess(&m, &reference);
-        assert_eq!(TONE_BANDS[4].0, "까랑함");
+        assert_eq!(TONE_BANDS[4].0.get(), "Harsh");
         assert!((e[4] - 6.0).abs() < 0.01 && e[3].abs() < 1e-4 && e[5].abs() < 1e-4);
     }
 }

@@ -4,20 +4,20 @@ SetCompressor /SOLID lzma
 RequestExecutionLevel user
 !include "MUI2.nsh"
 
-Name "믹서 분석기"
+Name "Mixer Analyzer"
 OutFile "../dist/MixerAnalyzer-Setup.exe"
 InstallDir "$LOCALAPPDATA\Programs\MixerAnalyzer"
 
 !define UNKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\MixerAnalyzer"
 !define MUI_FINISHPAGE_RUN "$INSTDIR\MixerAnalyzer.exe"
-!define MUI_FINISHPAGE_RUN_TEXT "믹서 분석기 실행"
+!define MUI_FINISHPAGE_RUN_TEXT "Run Mixer Analyzer"
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
-!insertmacro MUI_LANGUAGE "Korean"
+!insertmacro MUI_LANGUAGE "English"
 
 Section
   SetOutPath "$INSTDIR"
@@ -25,9 +25,12 @@ Section
   File "../README.md"
   File "../assets/Pretendard-LICENSE.txt"
   WriteUninstaller "$INSTDIR\Uninstall.exe"
-  CreateShortCut "$SMPROGRAMS\믹서 분석기.lnk" "$INSTDIR\MixerAnalyzer.exe"
-  CreateShortCut "$DESKTOP\믹서 분석기.lnk" "$INSTDIR\MixerAnalyzer.exe"
-  WriteRegStr HKCU "${UNKEY}" "DisplayName" "믹서 분석기"
+  ; 0.5.0 and older made Korean-named shortcuts: remove them on upgrade.
+  Delete "$SMPROGRAMS\믹서 분석기.lnk"
+  Delete "$DESKTOP\믹서 분석기.lnk"
+  CreateShortCut "$SMPROGRAMS\Mixer Analyzer.lnk" "$INSTDIR\MixerAnalyzer.exe"
+  CreateShortCut "$DESKTOP\Mixer Analyzer.lnk" "$INSTDIR\MixerAnalyzer.exe"
+  WriteRegStr HKCU "${UNKEY}" "DisplayName" "Mixer Analyzer"
   WriteRegStr HKCU "${UNKEY}" "DisplayVersion" "${VERSION}"
   WriteRegStr HKCU "${UNKEY}" "DisplayIcon" "$INSTDIR\MixerAnalyzer.exe"
   WriteRegStr HKCU "${UNKEY}" "InstallLocation" "$INSTDIR"
@@ -41,6 +44,9 @@ Section "Uninstall"
   Delete "$INSTDIR\README.md"
   Delete "$INSTDIR\Pretendard-LICENSE.txt"
   Delete "$INSTDIR\Uninstall.exe"
+  Delete "$SMPROGRAMS\Mixer Analyzer.lnk"
+  Delete "$DESKTOP\Mixer Analyzer.lnk"
+  ; Korean-named shortcuts of 0.5.0 and older.
   Delete "$SMPROGRAMS\믹서 분석기.lnk"
   Delete "$DESKTOP\믹서 분석기.lnk"
   DeleteRegKey HKCU "${UNKEY}"

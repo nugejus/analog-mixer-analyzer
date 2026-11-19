@@ -12,5 +12,5 @@ rm -f dist/latest.txt
 if [ -n "$SETUP_ID" ]; then
   printf '%s\nhttps://drive.usercontent.google.com/download?id=%s&export=download&confirm=t\n' "$VERSION" "$SETUP_ID" > dist/latest.txt
 else
-  echo "SETUP_ID가 비어 있어 latest.txt를 만들지 않습니다" >&2
+  echo "SETUP_ID is empty; not writing latest.txt" >&2
 fi
