@@ -24,6 +24,10 @@ At launch the app checks for a new version and shows **New version available** a
 
 The running version is at the bottom of the left panel.
 
+### Language
+
+The app starts in English. **English** / **한국어** at the bottom of the left panel switches it, and the choice is remembered. Saved settings work in either language.
+
 ## Connecting the mixer
 
 The app hears whatever reaches the computer. Send it the one channel you are setting up. The tip for the picked mixer also shows at the bottom of the window.
