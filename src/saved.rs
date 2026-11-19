@@ -1,6 +1,7 @@
 //! Expert sounds saved for restore, with the knob positions they were made with when entered:
 //! one tab-separated line each in `saved.tsv`.
 use crate::advice::Positions;
+use crate::lang::english;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -56,20 +57,6 @@ fn knobs(field: &str) -> Option<Positions> {
             (!l.is_empty()).then(|| (l.to_owned(), v))
         })
         .collect()
-}
-
-/// 0.5.0 and older wrote Korean mixer, group and knob labels: (old, new) so they still match the profiles.
-const LEGACY: [(&str, &str); 6] = [
-    ("1세대", "1st gen"),
-    ("VITA 프리앰프", "VITA preamps"),
-    ("스테레오 마이크", "stereo mic"),
-    ("모노/스테레오", "mono/stereo"),
-    ("모노 CH", "Mono CH"),
-    ("저역컷 ", "Low cut "),
-];
-
-fn english(s: &str) -> String {
-    LEGACY.iter().fold(s.to_owned(), |s, (old, new)| s.replace(old, new))
 }
 
 fn parse_line(line: &str) -> Option<Saved> {

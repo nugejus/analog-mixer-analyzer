@@ -1,6 +1,7 @@
 pub mod advice;
 pub mod audio;
 pub mod feedback;
+pub mod lang;
 pub mod levels;
 pub mod mixers;
 pub mod saved;

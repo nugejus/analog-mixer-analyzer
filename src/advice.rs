@@ -1,5 +1,6 @@
 //! Knob recommendation engine (spec "Recommendation engine").
 
+use crate::lang::L;
 use crate::mixers::{ChannelGroup, Control, EQ_RANGE_DB, KNOB_TRAVEL_DEG};
 use crate::speech::Summary;
 use crate::target::{BANDS_HZ, TONE_BANDS, TONE_HOT_DB, hpf_db, level_match_db, tone_excess};
@@ -23,9 +24,18 @@ const TAKE_NOISE_DB: f32 = 0.8;
 const NOISE_Z: f32 = 2.75;
 /// χ² 99.9% value per degrees of freedom (EQ knob count): if d² of the whole turn amount exceeds it, it is not noise.
 const CHI2_999: [f32; 5] = [0.0, 10.83, 13.82, 16.27, 18.47];
-pub const NO_INPUT: &str = "No input signal. Check the cable and the input device. On macOS, allow this app in System Settings > Privacy & Security > Microphone.";
-const KEEP_TALKING: &str = "Not enough speech. Press [Analyze] again and keep talking normally until the recording ends.";
-pub const OVERLOAD: &str = "Possible overload: the analog stage is squashing the signal, or COMP is too strong.";
+pub const NO_INPUT: L = L(
+    "No input signal. Check the cable and the input device. On macOS, allow this app in System Settings > Privacy & Security > Microphone.",
+    "입력 신호가 없습니다. 케이블과 입력장치를 확인하세요. macOS에서는 시스템 설정 > 개인정보 보호 및 보안 > 마이크에서 이 앱을 허용하세요.",
+);
+const KEEP_TALKING: L = L(
+    "Not enough speech. Press [Analyze] again and keep talking normally until the recording ends.",
+    "말소리가 부족합니다. [분석]을 다시 누르고 녹음이 끝날 때까지 평소처럼 말씀해 주세요.",
+);
+pub const OVERLOAD: L = L(
+    "Possible overload: the analog stage is squashing the signal, or COMP is too strong.",
+    "과부하 의심: 아날로그 단에서 눌리거나 COMP가 과한 경우입니다.",
+);
 
 fn weight(b: usize) -> f32 {
     if b == 23 { 0.5 } else { 1.0 }
@@ -324,7 +334,7 @@ impl AdviceEngine {
                 let note = if inp.silent { NO_INPUT } else { KEEP_TALKING };
                 return AdviceSet {
                     knobs: labels(group),
-                    notes: vec![note.into()],
+                    notes: vec![note.get().into()],
                     level_offset_db: 0.0,
                 };
             }
@@ -575,17 +585,19 @@ impl AdviceEngine {
 
         let mut notes = Vec::new();
         if let Some(f) = inp.feedback_hz {
-            notes.push(format!(
+            notes.push(crate::tr!(
                 "Possible feedback at {}: check the mic-to-speaker distance, set FREQ there and turn MID down.",
+                "하울링 의심({}: 마이크와 스피커 거리 확인, FREQ를 해당 눈금에 두고 MID를 줄이세요)",
                 fmt_hz(f)
             ));
         }
         if overload {
-            notes.push(OVERLOAD.into());
+            notes.push(OVERLOAD.get().into());
         }
         if s.snr_db < 30.0 {
-            notes.push(format!(
+            notes.push(crate::tr!(
                 "Background noise is high (SNR {:.0} dB). Move the mic closer to the mouth instead of raising GAIN.",
+                "주변 잡음이 큽니다(SNR {:.0}dB). GAIN보다 마이크를 입에 더 가깝게 하세요.",
                 s.snr_db
             ));
         }
@@ -691,7 +703,7 @@ const FX12: MixerModel = MixerModel::MackieProFx12v3;
     s.crest_db = 7.0; s.peak_db = -10.0;
     let a = run(&mut AdviceEngine::new(), &group(V3, 0), &s);
     assert_eq!(act(&a, "COMP"), Action::Ok);
-    assert!(a.notes.iter().any(|n| n == OVERLOAD));
+    assert!(a.notes.iter().any(|n| n == OVERLOAD.get()));
 }
 #[test] fn notes_for_feedback_and_snr() {
     let mut s = summary(|_| 0.0);

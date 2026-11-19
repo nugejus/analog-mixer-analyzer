@@ -1,15 +1,38 @@
 //! Analog mixer profiles (spec "Mixer data"). Only channel groups with mic inputs.
 
+use crate::lang::L;
+
 pub const EQ_RANGE_DB: f32 = 15.0;
 pub const KNOB_TRAVEL_DEG: f32 = 300.0;
 
-const MACKIE_USB: &str = "USB sends only the main mix to the PC (not PFL). Bring up only the channel you are adjusting; pull down the other channels and FX. Set its channel fader to U (0 dB).";
-const YAMAHA_MGP: &str = "This mixer has no USB audio to the PC, so you need an audio interface. Press PFL on the channel you are adjusting and connect MONITOR OUT L to the interface. Leave the MONITOR knob in one position.";
-const YAMAHA_XU: &str = "USB carries the STEREO bus (after the channel faders). Send only the channel you are adjusting to ST and turn the other channels off. Set its channel fader to 0 dB.";
-const BEHRINGER_USB: &str = "USB carries the main mix. Bring up only the channel you are adjusting; pull down the other channels and FX.";
-const SOUNDCRAFT_USB: &str = "With USB SEND on MST, USB carries the main mix. Bring up only the channel you are adjusting; pull down the other channels.";
-const AH_USB: &str = "With all USB output select switches released, USB carries the main L-R. Bring up only the channel you are adjusting; pull down the other channels.";
-const NO_USB_SOLO: &str = "This mixer has no USB. SOLO/PFL the channel you are adjusting and connect the CONTROL ROOM (or PHONES) output to the PC through an audio interface.";
+const MACKIE_USB: L = L(
+    "USB sends only the main mix to the PC (not PFL). Bring up only the channel you are adjusting; pull down the other channels and FX. Set its channel fader to U (0 dB).",
+    "USB로는 메인 믹스만 PC에 갑니다(PFL은 안 감). 맞출 채널만 올리고 다른 채널과 FX는 내리세요. 채널 페이더는 U(0dB)에 두세요.",
+);
+const YAMAHA_MGP: L = L(
+    "This mixer has no USB audio to the PC, so you need an audio interface. Press PFL on the channel you are adjusting and connect MONITOR OUT L to the interface. Leave the MONITOR knob in one position.",
+    "이 믹서는 PC로 가는 USB 오디오가 없습니다. 오디오 인터페이스가 필요합니다. 맞출 채널의 PFL을 켜고 MONITOR OUT L을 인터페이스에 연결하세요. MONITOR 노브는 한 위치에 고정하세요.",
+);
+const YAMAHA_XU: L = L(
+    "USB carries the STEREO bus (after the channel faders). Send only the channel you are adjusting to ST and turn the other channels off. Set its channel fader to 0 dB.",
+    "USB로는 STEREO 버스(채널 페이더 이후)가 갑니다. 맞출 채널만 ST로 보내고 다른 채널은 끄세요. 채널 페이더는 0dB에 두세요.",
+);
+const BEHRINGER_USB: L = L(
+    "USB carries the main mix. Bring up only the channel you are adjusting; pull down the other channels and FX.",
+    "USB로는 메인 믹스가 갑니다. 맞출 채널만 올리고 다른 채널과 FX는 내리세요.",
+);
+const SOUNDCRAFT_USB: L = L(
+    "With USB SEND on MST, USB carries the main mix. Bring up only the channel you are adjusting; pull down the other channels.",
+    "USB SEND를 MST로 두면 메인 믹스가 갑니다. 맞출 채널만 올리고 다른 채널은 내리세요.",
+);
+const AH_USB: L = L(
+    "With all USB output select switches released, USB carries the main L-R. Bring up only the channel you are adjusting; pull down the other channels.",
+    "USB 출력 선택 스위치를 모두 해제하면 메인 L-R이 갑니다. 맞출 채널만 올리고 다른 채널은 내리세요.",
+);
+const NO_USB_SOLO: L = L(
+    "This mixer has no USB. SOLO/PFL the channel you are adjusting and connect the CONTROL ROOM (or PHONES) output to the PC through an audio interface.",
+    "이 믹서는 USB가 없습니다. 맞출 채널을 SOLO/PFL하고 CONTROL ROOM(또는 PHONES) 출력을 오디오 인터페이스로 PC에 연결하세요.",
+);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Control {
@@ -31,7 +54,7 @@ pub struct MixerProfile {
     pub brand: &'static str,
     pub name: &'static str,
     pub groups: Vec<ChannelGroup>,
-    pub pc_tip: &'static str,
+    pub pc_tip: L,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -245,7 +268,7 @@ fn has(g: &ChannelGroup, c: Control) -> bool { g.controls.contains(&c) }
     for m in MixerModel::ALL {
         let p = MixerFactory::create(m);
         assert!(names.insert(format!("{} {}", p.brand, p.name)));
-        assert!(!p.groups.is_empty() && !p.pc_tip.is_empty());
+        assert!(!p.groups.is_empty() && !p.pc_tip.0.is_empty() && !p.pc_tip.1.is_empty());
         for g in &p.groups { assert!(matches!(g.controls[0], Gain { .. }), "{}", p.name); }
         let labels: std::collections::HashSet<_> = p.groups.iter().map(|g| g.label).collect();
         assert_eq!(labels.len(), p.groups.len());
@@ -268,7 +291,7 @@ fn has(g: &ChannelGroup, c: Control) -> bool { g.controls.contains(&c) }
         assert!(has(&p.groups[0], c) && has(&p.groups[1], c), "{c:?}");
     }
     assert!(!has(&p.groups[0], Comp) && has(&p.groups[1], Comp));
-    assert!(p.pc_tip.contains("MONITOR OUT"));
+    assert!(p.pc_tip.get().contains("MONITOR OUT"));
 }
 #[test] fn odd_strips() {
     let sig = MixerFactory::create(MixerModel::SoundcraftSignature22);
