@@ -25,7 +25,7 @@ const TICKS_HZ: [f64; 10] = [20.0, 50.0, 100.0, 200.0, 500.0, 1e3, 2e3, 5e3, 1e4
 const SMOOTHING: [(&str, f32); 3] = [("빠름 0.3초", 0.3), ("보통 1초", 1.0), ("느림 3초", 3.0)];
 const RESOLUTIONS: [(&str, usize); 4] =
     [("1/12옥타브", 12), ("1/24옥타브", 24), ("1/48옥타브", 48), ("1/96옥타브", 96)];
-/// 주파수 평활: (label, N of 1/N octave; 0 = off).
+/// Frequency smoothing: (label, N of 1/N octave; 0 = off).
 const FREQ_SMOOTH: [(&str, usize); 5] =
     [("없음", 0), ("1/24옥타브", 24), ("1/12옥타브", 12), ("1/6옥타브", 6), ("1/3옥타브", 3)];
 const KNOB_W: f32 = 96.0;
@@ -39,7 +39,7 @@ struct Recording {
     needed: usize,
     /// Last howl frequency seen during the recording.
     howl: Option<f32>,
-    /// 가운데 분석(안내창의 첫 버튼); false면 지금 세팅 그대로.
+    /// Center analysis (first button of the dialog); if false, the current settings as they are.
     flat: bool,
 }
 
@@ -78,9 +78,9 @@ struct Analysis {
     clipped: bool,
     howl: Option<f32>,
     silent: bool,
-    /// EQ 가운데·저역컷과 COMP 꺼짐에서 잰 분석; false면 지금 세팅 그대로.
+    /// Analysis measured with EQ centered, low cut and COMP off; if false, the current settings as they are.
     flat: bool,
-    /// 그대로 분석에서 [확인]한 노브 위치(가운데 분석이나 확인 전에는 `None`).
+    /// Knob position confirmed with `확인` in an as-is analysis (`None` for center analysis or before confirming).
     entered: Option<Positions>,
 }
 
@@ -115,7 +115,7 @@ fn khz(hz: f32) -> String {
 /// `sample_rate` is the current analysis rate (`None` before the first analysis).
 fn saved_goal(s: &Saved, mixer: &str, group: &str, sample_rate: Option<f32>) -> Goal {
     let mut notes = vec![];
-    // 0.3.1의 ProFX22v3 `CH15-18 (스테레오 마이크)`는 지금 `CH15-20`입니다.
+    // 0.3.1's ProFX22v3 `CH15-18 (스테레오 마이크)` is now `CH15-20`.
     let same_group = s.group == group || (s.group.as_str(), group) == ("CH15-18 (스테레오 마이크)", "CH15-20 (스테레오 마이크)");
     if s.mixer != mixer || !same_group {
         notes.push(format!(
@@ -137,7 +137,7 @@ fn saved_goal(s: &Saved, mixer: &str, group: &str, sample_rate: Option<f32>) -> 
 
 const FLAT_NOTE: &str = "가운데 분석의 추천 각도는 가운데에서 돌릴 양입니다. 그다음 미세 조정은 귀로 하세요. 예배 중에는 소리가 바뀌니 사운드 체크 때 하세요.";
 
-/// 분석 전 안내창의 줄: 그룹에 있는 노브만(팩토리 순서라 MID가 여럿이어도 dedup으로 한 번).
+/// Lines of the pre-analysis dialog: only knobs the group has (factory order, so a repeated MID is deduped to one).
 fn flat_lines(group: &ChannelGroup) -> Vec<String> {
     let (mut eq, mut off) = (vec![], vec![]);
     for c in &group.controls {
@@ -159,8 +159,8 @@ fn flat_lines(group: &ChannelGroup) -> Vec<String> {
 
 const AS_IS_NOTE: &str = "노브를 돌려 둔 채로 분석하거나 세팅을 저장할 때는 '지금 세팅 그대로 분석'을 누르고, 녹음이 끝나면 노브 위치를 입력하세요.";
 
-/// 분석 전 안내창: Some(Some(true)) = 가운데 분석(Enter), Some(Some(false)) = 그대로 분석,
-/// Some(None) = 취소(Esc, 바깥 클릭), None = 열려 있음.
+/// Pre-analysis dialog: Some(Some(true)) = center analysis (Enter), Some(Some(false)) = as-is analysis,
+/// Some(None) = cancel (Esc, outside click), None = open.
 fn flat_dialog(ctx: &egui::Context, group: &ChannelGroup) -> Option<Option<bool>> {
     let m = egui::Modal::new(egui::Id::unique("flat_start")).show(ctx, |ui| {
         ui.set_max_width(360.0);
@@ -182,7 +182,7 @@ fn flat_dialog(ctx: &egui::Context, group: &ChannelGroup) -> Option<Option<bool>
     if cancel || m.should_close() {
         Some(None)
     } else if as_is {
-        // 포커스된 [그대로] 버튼의 Enter도 클릭이라 Enter(= 가운데)보다 먼저 봅니다.
+        // Enter on the focused as-is button is also a click, so check it before Enter (= center).
         Some(Some(false))
     } else {
         (flat || enter).then_some(Some(true))
@@ -233,13 +233,13 @@ fn mixer_name(p: &MixerProfile) -> String {
 /// Below this the 16 kHz band is not measured: no knob turns and no saving.
 const MIN_RATE: f32 = 40_000.0;
 
-/// 노브 위치를 받을 수 있는 분석: 말소리 충분, 16 kHz까지 잼, 입력 있음.
+/// Analysis that can take knob positions: enough speech, measured up to 16 kHz, has input.
 fn usable(a: &Analysis) -> bool {
     a.summary.is_some() && a.sample_rate >= MIN_RATE && !a.silent
 }
 
-/// 그 분석의 노브 위치: 가운데 분석은 가운데, 그대로 분석은 [확인]한 위치(그 그룹에 맞을 때만).
-/// `None`이면 추천도 저장도 없습니다.
+/// Knob positions of that analysis: center for center analysis, the confirmed position for as-is analysis (only if it fits the group).
+/// With `None` there is neither recommendation nor saving.
 fn current(a: &Analysis, group: &ChannelGroup) -> Option<Positions> {
     if a.flat {
         Some(advice::centre(group))
@@ -267,7 +267,7 @@ fn advise(a: &Analysis, group: &ChannelGroup, goal: &Goal) -> AdviceSet {
             feedback_hz: a.howl,
             silent: a.silent,
             restore_dynamic_range_db: goal.restore_dr,
-            // 가운데 분석은 `None`: 결과는 가운데와 같고, 입력한 위치의 잡음 ✓ 범위는 쓰지 않습니다.
+            // Center analysis is `None`: the result equals center, and the noise ✓ range of an entered position is not used.
             current: a.entered.as_ref().filter(|_| !a.flat),
         },
     );
@@ -275,21 +275,21 @@ fn advise(a: &Analysis, group: &ChannelGroup, goal: &Goal) -> AdviceSet {
     s
 }
 
-/// 노브 줄에 보일 것(spec 규칙 1–6).
+/// What the knob line shows (spec rules 1–6).
 enum KnobView {
-    /// 1: 노브 위치 입력 칸.
+    /// 1: knob position input fields.
     Entry,
-    /// 2·3: 추천과 그 출발 위치(`None`이면 가운데 분석).
+    /// 2·3: recommendation and its starting position (`None` means center analysis).
     Advice(AdviceSet, Option<Positions>),
-    /// 5: 고른 저장 세팅의 노브 위치.
+    /// 5: knob positions of the picked saved setting.
     Stored(Vec<Advice>),
-    /// 4: 노브 이름과 노트 하나.
+    /// 4: knob names and one note.
     Names(String),
-    /// 6: 분석 없음.
+    /// 6: no analysis.
     None,
 }
 
-/// 고른 저장 세팅의 노브 위치: 같은 믹서·그룹이고 라벨이 그룹과 맞을 때만.
+/// Knob positions of the picked saved setting: only if same mixer and group and labels fit the group.
 fn stored<'a>(saved: Option<&'a Saved>, mixer: &str, group: &ChannelGroup) -> Option<&'a Positions> {
     saved
         .filter(|s| s.mixer == mixer && s.group == group.label)
@@ -297,7 +297,7 @@ fn stored<'a>(saved: Option<&'a Saved>, mixer: &str, group: &ChannelGroup) -> Op
         .filter(|k| advice::fits(group, k))
 }
 
-/// 규칙 1–6. 5의 GAIN은 ✓이고(`as_advice`), 1과 5는 엔진 노트를 버립니다.
+/// Rules 1–6. GAIN in 5 is ✓ (`as_advice`), and 1 and 5 drop engine notes.
 fn knob_view(
     analysis: Option<&Analysis>,
     editing: bool,
@@ -316,13 +316,13 @@ fn knob_view(
         return KnobView::Advice(advise(a, group, goal), None);
     }
     if !usable(a) {
-        // 말소리 부족·낮은 샘플레이트·입력 없음: 엔진의 첫 노트가 그 이유입니다.
+        // Not enough speech, low sample rate, no input: the engine's first note is the reason.
         return KnobView::Names(advise(a, group, goal).notes.remove(0));
     }
     current(a, group).map_or(KnobView::None, |k| KnobView::Advice(advise(a, group, goal), Some(k)))
 }
 
-/// 입력 칸의 미리 채움: 노브 줄이 보여 주던 목표 위치(눈금이라 정수). 그 밖이나 그룹과 맞지 않으면 가운데.
+/// Input field prefill: the target position the knob line showed (integer since it is a tick). Center if outside that or not fitting the group.
 fn prefill(view: &KnobView, group: &ChannelGroup) -> Positions {
     let centre = advice::centre(group);
     let p = match view {
@@ -334,8 +334,8 @@ fn prefill(view: &KnobView, group: &ChannelGroup) -> Positions {
     if advice::fits(group, &p) { p } else { centre }
 }
 
-/// 분석 `a`에 맞는 (입력 칸, 지닌 미리 채움). 쓸 수 없는 그대로 분석은 노브 줄이 이유 노트뿐이라 미리 채움이
-/// 가운데로 돌아가므로, 채움을 지녀 두었다가 다시 분석할 때 씁니다.
+/// (input fields, carried prefill) fitting analysis `a`. An unusable as-is analysis has only a reason note in the knob line, so the prefill
+/// would return to center; keep the fill and use it on the next analysis.
 fn entry_after(a: &Analysis, fill: Positions) -> (Option<Positions>, Option<Positions>) {
     match (a.flat, usable(a)) {
         (true, _) => (None, None),
@@ -344,7 +344,7 @@ fn entry_after(a: &Analysis, fill: Positions) -> (Option<Positions>, Option<Posi
     }
 }
 
-/// 노브 줄 머리글 아래의 `저장된 노브: …`(가운데가 아닌 노브만, FREQ는 그 MID가 0이 아닐 때만).
+/// `저장된 노브: …` under the knob line header (only non-center knobs, FREQ only when its MID is not 0).
 fn saved_line(saved: Option<&Saved>, mixer: &str, group: &ChannelGroup) -> Option<String> {
     let p = stored(saved, mixer, group)?;
     let at = |l: &str| p.iter().find(|e| e.0 == l).map_or(0.0, |e| e.1);
@@ -366,12 +366,12 @@ fn saved_line(saved: Option<&Saved>, mixer: &str, group: &ChannelGroup) -> Optio
     Some(if items.is_empty() { "저장된 노브: 모두 가운데(저역컷·COMP 꺼짐)".into() } else { format!("저장된 노브: {}", items.join(" · ")) })
 }
 
-/// 상태 줄의 과부하 의심: 노브 줄(규칙 1·5는 엔진 노트를 버림)과 상관없이 마지막 분석의 엔진 결과.
+/// Suspected overload in the status line: the last analysis's engine result, regardless of the knob line (rules 1·5 drop engine notes).
 fn overloaded(a: Option<&Analysis>, group: &ChannelGroup, goal: &Goal) -> bool {
     a.is_some_and(|a| advise(a, group, goal).notes.iter().any(|n| n == advice::OVERLOAD))
 }
 
-/// 노브 줄 머리글.
+/// Knob line header.
 fn header(v: &KnobView) -> Option<&'static str> {
     match v {
         KnobView::Entry => Some("지금 노브 위치를 믹서 눈금대로 입력하고 [확인]을 누르세요."),
@@ -498,13 +498,13 @@ pub struct App {
     /// Index into `FREQ_SMOOTH`.
     freq_smooth: usize,
     analysis: Option<Analysis>,
-    /// 열려 있는 노브 위치 입력 칸(늘 지금 그룹의 라벨).
+    /// Open knob position input fields (always the current group's labels).
     editing: Option<Positions>,
-    /// 쓸 수 없는 그대로 분석이 지닌 미리 채움(다음 분석에 씀, 늘 지금 그룹의 라벨).
+    /// Prefill carried by an unusable as-is analysis (used for the next analysis, always the current group's labels).
     kept: Option<Positions>,
     /// Rebuilt by `readvise`.
     view: KnobView,
-    /// 과부하 의심; rebuilt by `readvise`.
+    /// Suspected overload; rebuilt by `readvise`.
     overload: bool,
     show: Show,
     update: Update,
@@ -602,8 +602,8 @@ impl App {
         }
     }
 
-    /// 믹서·그룹을 바꾸면 입력한 위치는 버리고, 쓸 수 있는 그대로 분석이면 그 그룹의 미리 채움(같은 믹서·그룹의
-    /// 저장된 위치, 없으면 가운데)으로 입력 칸을 다시 엽니다(쓸 수 없으면 그 채움을 지님).
+    /// Changing mixer or group discards the entered position and, for a usable as-is analysis, reopens the input fields with that group's prefill (the same mixer/group's
+    /// saved position, else center) (if unusable, that fill is carried).
     fn regroup(&mut self) {
         let group = &self.profile.groups[self.group];
         let fill = stored(self.picked(), &mixer_name(&self.profile), group).cloned().unwrap_or_else(|| advice::centre(group));
@@ -616,7 +616,7 @@ impl App {
 
     /// Writes the saved list; a failure shows in red under 안내 and the list stays in memory.
     fn persist(&mut self) {
-        // 막힌 이유(줄 번호, 읽기 실패)가 떠 있으면 그대로 둡니다.
+        // Leave a blocking reason (line number, read failure) if shown.
         let reason = |e: &str| e.starts_with("saved.tsv의") || e.starts_with("읽지 못했습니다");
         if self.write_blocked && self.save_error.as_deref().is_some_and(reason) {
             return;
@@ -857,11 +857,11 @@ impl App {
         }
         ui.horizontal_wrapped(|ui| self.save_controls(ui));
         ui.separator();
-        // 버튼보다 먼저: [분석]을 누른 Enter가 같은 프레임에 안내창까지 확인하지 않게 합니다.
+        // Before the button: so the Enter that pressed `분석` does not also confirm the dialog in the same frame.
         if self.flat_start {
             let r = flat_dialog(ui.ctx(), &self.profile.groups[self.group]);
             self.flat_start = r.is_none();
-            // 그사이 입력장치가 안 열리면(Err) 녹음하지 않고 닫기만 합니다.
+            // If the input device does not open meanwhile (Err), do not record, just close.
             if let Some(Some(flat)) = r
                 && let Ok(live) = &mut self.live
             {
@@ -1259,13 +1259,13 @@ fn caption(k: &Advice, from: f32) -> Vec<(String, Color32)> {
             };
             let turn = (format!("{dir} {:.0}°", degrees.abs()), mocha::YELLOW);
             match k.control {
-                // COMP는 왼쪽 끝(꺼짐)에서 잰 목표 각도이고, db는 의미 없는 0입니다.
+                // COMP is the target angle measured from the left end (off), and db is a meaningless 0.
                 Control::Comp => one(format!("왼쪽 끝에서 {:.0}°로", from + degrees), mocha::YELLOW),
-                // GAIN은 가운데가 아니라 지금 위치에서 잽니다.
+                // GAIN is measured at the current position, not center.
                 Control::Gain { .. } => {
                     vec![turn, (format!("(≈{db:+.0}dB)"), mocha::YELLOW), ("(지금 위치에서)".into(), mocha::SUBTEXT0)]
                 }
-                // EQ의 db는 목표 위치(가운데에서)입니다.
+                // EQ's db is the target position (from center).
                 _ => vec![turn, (format!("({db:+.0}dB 눈금으로)"), mocha::YELLOW)],
             }
         }
@@ -1278,7 +1278,7 @@ fn at(c: Pos2, r: f32, deg: f32) -> Pos2 {
     c + r * vec2(a.sin(), -a.cos())
 }
 
-/// `from`: 지금 위치(EQ dB, FREQ Hz(0 = 모름), 저역컷 1/0, COMP 왼쪽 끝에서 °). 바늘은 거기, 호는 목표까지.
+/// `from`: current position (EQ dB, FREQ Hz (0 = unknown), low cut 1/0, COMP ° from the left end). Needle there, arc to the target.
 fn dial(ui: &mut egui::Ui, k: &Advice, from: f32) {
     let (resp, p) = ui.allocate_painter(vec2(KNOB_W, 2.0 * KNOB_R + 24.0), Sense::hover());
     let c = resp.rect.center();
@@ -1290,14 +1290,14 @@ fn dial(ui: &mut egui::Ui, k: &Advice, from: f32) {
         let color = if on { mocha::SAPPHIRE } else { mocha::OVERLAY1 };
         p.rect_filled(r, 4.0, mocha::SURFACE0);
         p.rect_stroke(r, 4.0, Stroke::new(2.0, color), StrokeKind::Inside);
-        // 눌린 쪽(아래)을 칠합니다: 켜기 권장이면 sapphire.
+        // Paint the pressed side (below): sapphire if turning on is recommended.
         let lit = Rect::from_min_max(r.center() + vec2(-8.0, 2.0), r.max - Vec2::splat(5.0));
         p.rect_filled(lit, 2.0, if on { mocha::SAPPHIRE } else { mocha::SURFACE2 });
         return;
     }
     p.circle_filled(c, KNOB_R, mocha::SURFACE0);
     p.circle_stroke(c, KNOB_R, Stroke::new(1.5, mocha::OVERLAY1));
-    // COMP는 왼쪽 끝(꺼짐)에서, EQ는 12시에서 잽니다. GAIN은 지금 위치를 모르니 12시.
+    // COMP is measured from the left end (off), EQ from 12 o'clock. GAIN's current position is unknown, so 12 o'clock.
     let start = match k.control {
         Control::Comp => -150.0 + from,
         Control::Gain { .. } => 0.0,
@@ -1323,7 +1323,7 @@ fn dial(ui: &mut egui::Ui, k: &Advice, from: f32) {
                 Stroke::NONE,
             ));
         }
-        // FREQ: 추천 눈금에 노란 바늘, ✓면 지금 눈금에 흐린 바늘(모르면 없음).
+        // FREQ: yellow needle at the recommended tick; if ✓, a faint needle at the current tick (none if unknown).
         (action, Control::Mid { lo_hz, hi_hz }) if k.label.starts_with("FREQ") => {
             let (hz, color) = match action {
                 Action::SetFreq { hz } => (hz, mocha::YELLOW),
@@ -1345,7 +1345,7 @@ fn dial(ui: &mut egui::Ui, k: &Advice, from: f32) {
     }
 }
 
-/// `from`: 추천의 출발 위치(`None`이면 가운데).
+/// `from`: starting position of the recommendation (`None` means center).
 fn knob_row(ui: &mut egui::Ui, knobs: &[Advice], from: Option<&Positions>) {
     ui.horizontal_top(|ui| {
         for k in knobs {
@@ -1361,13 +1361,13 @@ fn knob_row(ui: &mut egui::Ui, knobs: &[Advice], from: Option<&Positions>) {
     });
 }
 
-/// 돌린 MID(≠ 0)의 FREQ가 모름(0)이면 참(`Positions`에서 FREQ 바로 뒤가 그 MID). 엔진이 다른 주파수로 계산해
-/// 맞게 둔 FREQ를 옮기라고 하므로 [확인]을 막습니다.
+/// True if the FREQ of a turned MID (≠ 0) is unknown (0) (in `Positions` that MID is right after FREQ). The engine computes with another frequency
+/// and would tell you to move a FREQ that was set correctly, so `확인` is blocked.
 fn freq_missing(p: &Positions) -> bool {
     p.windows(2).any(|w| w[0].0.starts_with("FREQ") && w[0].1 == 0.0 && w[1].1 != 0.0)
 }
 
-/// 노브 위치 입력 칸(그룹 순서, `p`는 그 그룹의 라벨). [확인]은 머리글 줄에 있습니다(8노브 줄은 좁은 창을 넘음).
+/// Knob position input fields (group order, `p` has that group's labels). `확인` is in the header line (a row of 8 knobs overflows a narrow window).
 fn entry_row(ui: &mut egui::Ui, group: &ChannelGroup, p: &mut Positions) {
     let mut values = p.iter_mut().map(|e| &mut e.1);
     let dim = |ui: &mut egui::Ui, t: &str| ui.colored_label(mocha::SUBTEXT0, t);
@@ -1387,7 +1387,7 @@ fn entry_row(ui: &mut egui::Ui, group: &ChannelGroup, p: &mut Positions) {
                         *v = if on { 1.0 } else { 0.0 };
                     }
                     Control::Comp => {
-                        // 치는 동안 맞추면 "3"이 5가 되어 30이 50이 됩니다: 칸을 벗어날 때 5° 단위로.
+                        // Fitting while typing turns "3" into 5 and 30 into 50: round to 5° when leaving the field.
                         if !ui.add(egui::DragValue::new(v).range(0.0..=300.0).suffix("°")).has_focus() {
                             *v = (*v / 5.0).round() * 5.0;
                         }
@@ -1437,7 +1437,7 @@ impl eframe::App for App {
             })
         });
         if let Some(a) = finished {
-            // 미리 채움은 분석 직전 노브 줄이 보여 주던 위치입니다(열려 있던 입력 칸이나 지닌 채움이면 그 값).
+            // Prefill is the position the knob line showed just before analysis (the open input fields or carried fill if any).
             let g = &self.profile.groups[self.group];
             let fill = self.editing.take().or(self.kept.take()).unwrap_or_else(|| prefill(&self.view, g));
             (self.editing, self.kept) = entry_after(&a, fill);
@@ -1564,7 +1564,7 @@ impl eframe::App for App {
             self.readvise();
         }
         if reopen {
-            // 다시 [확인]하기 전에는 입력한 위치가 없습니다(저장도 막힘).
+            // Before confirming again there is no entered position (saving is blocked too).
             self.editing = self.analysis.as_mut().and_then(|a| a.entered.take());
             self.readvise();
         }
@@ -1830,7 +1830,7 @@ mod tests {
 
     #[test] fn low_sample_rate_gives_names_and_one_note() {
         let g = &MixerFactory::create(MixerModel::MackieProFx12v3).groups[0];
-        let goal = preset_goal(2, Voice::Male, g); // 300Hz 노트가 있는 목표
+        let goal = preset_goal(2, Voice::Male, g); // goal with a 300Hz note
         assert!(!goal.notes.is_empty());
         let s = advise(&Analysis { sample_rate: 24_000.0, ..natural(|_| 6.0) }, g, &goal);
         assert!(s.knobs.iter().all(|k| k.action == Action::Wait), "{:?}", s.knobs);
@@ -1891,10 +1891,10 @@ mod tests {
     }
     #[test] fn restore_from_saved_says_switch_on() {
         let g = &MixerFactory::create(MixerModel::MackieProFx22v3).groups[0];
-        let saved_now = natural(|f| hpf_db(100.0, f)); // 저장 때: 스위치 켜짐
+        let saved_now = natural(|f| hpf_db(100.0, f)); // when saved: switch on
         let s = Saved { name: "x".into(), mixer: "m".into(), group: g.label.into(),
                         dynamic_range_db: 10.0, bands_db: saved_now.summary.as_ref().unwrap().bands_db, sample_rate: Some(48_000), knobs: None };
-        let a = advise(&natural(|_| 0.0), g, &saved_goal(&s, "m", g.label, Some(48_000.0))); // 지금: 꺼짐(가운데에서 시작)
+        let a = advise(&natural(|_| 0.0), g, &saved_goal(&s, "m", g.label, Some(48_000.0))); // now: off (starts from center)
         assert_eq!(knob(&a, "저역컷 100Hz"), Action::SwitchOn);
     }
 
@@ -1934,7 +1934,7 @@ mod tests {
     fn as_is(a: Analysis) -> Analysis {
         Analysis { flat: false, ..a }
     }
-    /// ProFX22v3 CH1-12에서 가운데 소리(남성 LTASS)로 시작해 저역컷만 켜고 저장한 세팅.
+    /// Setting saved on ProFX22v3 CH1-12 starting from the centered sound (male LTASS) with only the low cut turned on.
     fn knob_setup() -> (MixerProfile, String, Saved) {
         let p = MixerFactory::create(MixerModel::MackieProFx22v3);
         let m = mixer_name(&p);
@@ -1962,24 +1962,24 @@ mod tests {
         };
         let (flat, done) = (natural(|_| 0.0), as_is(natural(|f| hpf_db(100.0, f))));
         let entered = Analysis { entered: s.knobs.clone(), ..as_is(natural(|f| hpf_db(100.0, f))) };
-        // 1: 입력 칸이 열려 있으면 입력 칸.
+        // 1: input fields if open.
         for a in [None, Some(&flat), Some(&done), Some(&entered)] {
             assert!(matches!(view(a, true, Some(&s)), KnobView::Entry));
         }
         assert_eq!(header(&KnobView::Entry), Some("지금 노브 위치를 믹서 눈금대로 입력하고 [확인]을 누르세요."));
-        // 2: 가운데 분석은 저장된 노브 위치가 있어도 가운데에서의 추천.
+        // 2: center analysis recommends from center even if saved knob positions exist.
         let v = view(Some(&flat), false, Some(&s));
         assert!(matches!(&v, KnobView::Advice(a, None) if knob(a, "저역컷 100Hz") == Action::SwitchOn));
         assert_eq!(header(&v), Some("추천: 가운데(12시)에서 돌릴 양"));
-        // 3: 확인한 그대로 분석은 입력한 위치에서. 저장한 소리를 그 위치로 다시 재면 모두 ✓.
+        // 3: confirmed as-is analysis is from the entered position. Re-measuring the saved sound at that position gives all ✓.
         let v = view(Some(&entered), false, Some(&s));
         assert!(matches!(&v, KnobView::Advice(a, Some(k)) if Some(k) == s.knobs.as_ref() && a.knobs.iter().all(|x| x.action == Action::Ok)));
         assert_eq!(header(&v), Some("추천: 입력한 위치에서 돌릴 양"));
-        // 확인 전 그대로 분석은 추천이 아닙니다.
+        // As-is analysis before confirming is not a recommendation.
         for saved in [None, Some(&s)] {
             assert!(!matches!(view(Some(&done), false, saved), KnobView::Advice(..)));
         }
-        // 4: 쓸 수 없는 그대로 분석은 노브 이름과 그 이유.
+        // 4: unusable as-is analysis shows knob names and the reason.
         let short = as_is(Analysis { summary: None, ..natural(|_| 0.0) });
         let low_rate = Analysis { sample_rate: 22_050.0, ..as_is(natural(|_| 0.0)) };
         for (a, why) in [(&short, "말소리가 부족합니다"), (&low_rate, "입력 샘플레이트가 22.1kHz")] {
@@ -1987,12 +1987,12 @@ mod tests {
             assert!(matches!(&v, KnobView::Names(n) if n.starts_with(why)), "{why}");
             assert_eq!(header(&v), None);
         }
-        // 5: 분석 없음 + 같은 믹서·그룹의 저장된 노브 위치(GAIN ✓).
+        // 5: no analysis + saved knob positions of the same mixer/group (GAIN ✓).
         let v = view(None, false, Some(&s));
         let KnobView::Stored(k) = &v else { panic!("rule 5") };
         assert_eq!((act(k, "저역컷 100Hz"), act(k, "GAIN")), (Action::SwitchOn, Action::Ok));
         assert_eq!(header(&v), Some("저장된 세팅: 가운데(12시)에서 돌릴 양"));
-        // 6: 다른 믹서·그룹, 노브 위치 없음, 라벨이 그룹과 맞지 않음.
+        // 6: other mixer/group, no knob positions, labels not fitting the group.
         let other_mixer = Saved { mixer: "Mackie ProFX22 (1세대, 2011)".into(), ..s.clone() };
         let other_group = Saved { group: p.groups[1].label.into(), ..s.clone() };
         let old = Saved { knobs: None, ..s.clone() };
@@ -2015,7 +2015,7 @@ mod tests {
             }
             AdviceSet { knobs, notes: vec![], level_offset_db: 0.0 }
         };
-        // 추천대로 돌린 위치(눈금이라 정수), ✓는 그때의 K.
+        // Position turned as recommended (integer since it is a tick), ✓ is K at that time.
         let v = KnobView::Advice(set("HIGH 12kHz", Action::Rotate { degrees: 60.0, db: 5.8 }), None);
         assert_eq!(prefill(&v, g), pos(g, &[("HIGH 12kHz", 6.0)]));
         let v = KnobView::Advice(set("", Action::Ok), Some(pos(g, &[("HIGH 12kHz", 4.0)])));
@@ -2040,8 +2040,8 @@ mod tests {
         assert_eq!(saved_line(None, &m, g), None);
     }
     #[test] fn centre_analysis_keeps_the_fixed_ok_range() {
-        // 가운데 분석은 `current: None`이라 복구에서도 ✓ 범위가 2.5 dB입니다. 가운데 위치를 넘기면 80 Hz LOW의
-        // 잡음 ✓ 범위(약 5 dB)라 4 dB 붐이 ✓가 됩니다.
+        // Center analysis is `current: None`, so even when restoring the ✓ range is 2.5 dB. Passing the center position makes it the 80 Hz LOW's
+        // noise ✓ range (about 5 dB), so a 4 dB boom becomes ✓.
         let p = MixerFactory::create(MixerModel::MackieProFx12v3);
         let (m, g) = (mixer_name(&p), &p.groups[0]);
         let done = natural(|_| 0.0).summary.unwrap();
@@ -2067,7 +2067,7 @@ mod tests {
         let dull = natural(|f| -6.0 * advice::Shape::HighShelf(12_000.0).response(f));
         let fill = prefill(&knob_view(Some(&dull), false, None, &m, g, &goal), g);
         assert_ne!(fill, advice::centre(g));
-        // 말소리 부족: 노브 줄은 이유 노트라 그 미리 채움은 가운데지만, 지닌 채움으로 다시 분석합니다.
+        // Not enough speech: the knob line is a reason note so its prefill is center, but re-analysis uses the carried fill.
         let short = as_is(Analysis { summary: None, ..natural(|_| 0.0) });
         let v = knob_view(Some(&short), false, None, &m, g, &goal);
         assert_eq!(prefill(&v, g), advice::centre(g));
@@ -2096,7 +2096,7 @@ mod tests {
             }
             p[0].1
         };
-        // 한 글자씩 쳐도 그 수가 되고, 칸을 벗어나면 5° 단위.
+        // Typing one character at a time gives that number too, and leaving the field rounds to 5°.
         assert_eq!(typed(&["3", "0"]), 30.0);
         assert_eq!(typed(&["1", "2", "0"]), 120.0);
         assert_eq!(typed(&["3", "2"]), 30.0);
@@ -2107,7 +2107,7 @@ mod tests {
         let goal = preset_goal(0, Voice::Male, g);
         let done = as_is(natural(|f| hpf_db(100.0, f)));
         let done = Analysis { summary: done.summary.map(|s| Summary { crest_db: 7.0, peak_db: -10.0, ..s }), ..done };
-        // 입력 칸은 엔진 노트를 보이지 않아도 상태 줄의 과부하 의심은 켜집니다.
+        // Input fields do not show engine notes, but the status line's suspected overload is on.
         assert!(matches!(knob_view(Some(&done), true, None, &m, g, &goal), KnobView::Entry));
         assert!(overloaded(Some(&done), g, &goal));
         assert!(!overloaded(Some(&natural(|_| 0.0)), g, &goal));
@@ -2124,9 +2124,9 @@ mod tests {
             }
             r
         };
-        // 포커스가 없으면 Enter는 가운데 분석.
+        // Without focus, Enter is center analysis.
         assert_eq!(last(vec![vec![], key(egui::Key::Enter)]), Some(Some(true)));
-        // Tab 두 번이면 [지금 세팅 그대로 분석]에 포커스: 그 Enter는 버튼 클릭이라 그대로 분석입니다.
+        // Two Tabs focus `지금 세팅 그대로 분석`: its Enter is a button click, so as-is analysis.
         let tab = || key(egui::Key::Tab);
         assert_eq!(last(vec![vec![], tab(), tab(), key(egui::Key::Enter)]), Some(Some(false)));
     }

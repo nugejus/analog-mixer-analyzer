@@ -13,7 +13,7 @@ pub enum Voice {
     Female,
 }
 
-/// 2차 하이패스(12 dB/옥타브) 응답: −10·log10(1 + (fc/f)^4).
+/// 2nd-order high-pass (12 dB/octave) response: −10·log10(1 + (fc/f)^4).
 pub fn hpf_db(fc: f32, hz: f32) -> f32 {
     -10.0 * (1.0 + (fc / hz).powi(4)).log10()
 }
@@ -21,7 +21,7 @@ pub fn hpf_db(fc: f32, hz: f32) -> f32 {
 /// Half-width in octaves of a Bell (sigma 0.6 octave).
 pub const BELL_OCT: f32 = 0.7;
 
-/// 세팅 표의 EQ 변화: (hz, gain_db, width_oct). Bell 폭 0이면 σ = 0.6옥타브.
+/// EQ change from the settings table: (hz, gain_db, width_oct). With Bell width 0, σ = 0.6 octave.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Move {
     Hpf(f32),
@@ -37,7 +37,7 @@ pub struct Preset {
     pub moves: &'static [Move],
 }
 
-/// spec "세팅 표". 0번 = 기본.
+/// spec "Settings table". Index 0 = default.
 pub const PRESETS: [Preset; 6] = [
     Preset { category: "기본", name: "자연스러운 목소리", when: "목소리를 있는 그대로 자연스럽게 맞춥니다.", moves: &[] },
     Preset {
@@ -72,7 +72,7 @@ pub const PRESETS: [Preset; 6] = [
     },
 ];
 
-/// `m`이 `hz`에서 바꾸는 dB.
+/// dB that `m` changes at `hz`.
 pub fn move_db(m: &Move, hz: f32) -> f32 {
     match *m {
         Move::Hpf(fc) => hpf_db(fc, hz),
@@ -85,7 +85,7 @@ pub fn move_db(m: &Move, hz: f32) -> f32 {
     }
 }
 
-/// LTASS + 세팅의 move. hpf는 그룹의 저역컷 스위치 hz로 바꾸고, 맡을 노브가 없는 move(스위치 없는 hpf 포함)는 빼서 그 hz를 돌려줍니다.
+/// LTASS + the setting's moves. hpf is changed to the group's low-cut switch hz; moves with no knob to handle them (including hpf with no switch) are removed and their hz returned.
 pub fn preset_target(p: &Preset, voice: Voice, group: &ChannelGroup) -> ([f32; 25], Vec<f32>) {
     let ctl = &group.controls;
     let cut = ctl.iter().find_map(|&c| match c {
@@ -201,7 +201,7 @@ mod tests {
         assert!((t[0] - want).abs() < 1e-4);
     }
     #[test] fn hpf_dropped_without_switch() {
-        // 스위치가 없으면 LOW가 저역컷을 흉내 내며 크게 깎지 않게 뺍니다.
+        // With no switch, remove it so LOW does not mimic the low cut and cut hard.
         let (t, dropped) = preset_target(&PRESETS[3], Voice::Male, &g(MixerModel::SoundcraftEpm));
         let want: [f32; 25] = std::array::from_fn(|i| ltass_db(Voice::Male)[i] + move_db(&Move::Bell(3000.0, 4.0, 0.0), BANDS_HZ[i]));
         assert!(t.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-4) && dropped == [100.0], "{t:?} {dropped:?}");
@@ -210,10 +210,10 @@ mod tests {
     }
     #[test] fn moves_without_knob_are_dropped() {
         let dropped = |i: usize, m| preset_target(&PRESETS[i], Voice::Male, &g(m)).1;
-        assert_eq!(dropped(2, MixerModel::MackieProFx12v3), [300.0]); // 고정 MID 2.5k
-        assert_eq!(dropped(4, MixerModel::MackieProFx12v3), Vec::<f32>::new()); // 3750은 0.7옥타브 안
-        assert_eq!(dropped(3, MixerModel::AhZedi10), [3000.0]); // 고정 MID 600
-        assert_eq!(dropped(4, MixerModel::YamahaMg06x), [3750.0]); // MID 없음
+        assert_eq!(dropped(2, MixerModel::MackieProFx12v3), [300.0]); // fixed MID 2.5k
+        assert_eq!(dropped(4, MixerModel::MackieProFx12v3), Vec::<f32>::new()); // 3750 is within 0.7 octave
+        assert_eq!(dropped(3, MixerModel::AhZedi10), [3000.0]); // fixed MID 600
+        assert_eq!(dropped(4, MixerModel::YamahaMg06x), [3750.0]); // no MID
         assert_eq!(dropped(2, MixerModel::MackieProFx22v3), Vec::<f32>::new());
         let (t, _) = preset_target(&PRESETS[2], Voice::Male, &g(MixerModel::MackieProFx12v3));
         let want = ltass_db(Voice::Male)[7] + hpf_db(100.0, 315.0) + move_db(&Move::HighShelf(10000.0, 2.5), 315.0);
@@ -261,7 +261,7 @@ mod tests {
     fn tone_excess_follows_reference_level() {
         let reference = [-40.0f32; 25];
         let mut m = reference;
-        m[14..=16].iter_mut().for_each(|v| *v += 6.0); // 1600, 2000, 2500 = 까랑함
+        m[14..=16].iter_mut().for_each(|v| *v += 6.0); // 1600, 2000, 2500 = harshness
         let e = tone_excess(&m, &reference);
         assert_eq!(TONE_BANDS[4].0, "까랑함");
         assert!((e[4] - 6.0).abs() < 0.01 && e[3].abs() < 1e-4 && e[5].abs() < 1e-4);

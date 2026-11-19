@@ -1,4 +1,4 @@
-//! 아날로그 믹서 프로필(spec "믹서 데이터"). 마이크 입력이 있는 채널 그룹만 담습니다.
+//! Analog mixer profiles (spec "Mixer data"). Only channel groups with mic inputs.
 
 pub const EQ_RANGE_DB: f32 = 15.0;
 pub const KNOB_TRAVEL_DEG: f32 = 300.0;
@@ -16,7 +16,7 @@ pub enum Control {
     Gain { range_db: f32 },
     LowCut { hz: f32 },
     HighShelf { hz: f32 },
-    /// `lo_hz == hi_hz`면 고정 MID.
+    /// If `lo_hz == hi_hz`, a fixed MID.
     Mid { lo_hz: f32, hi_hz: f32 },
     LowShelf { hz: f32 },
     Comp,
@@ -79,7 +79,7 @@ impl MixerModel {
     };
 }
 
-/// 순서: Gain, LowCut?, HighShelf, Mid(높은 대역부터), LowShelf, Comp?
+/// Order: Gain, LowCut?, HighShelf, Mid (from the highest band), LowShelf, Comp?
 fn strip(
     label: &'static str,
     gain: f32,
@@ -103,9 +103,9 @@ fn strip(
 pub struct MixerFactory;
 
 impl MixerFactory {
-    // 신뢰도 중간(문서끼리 값이 다르거나 문서로 확인 못 함): Behringer 저역컷 75/80 Hz,
-    // Soundcraft Signature 게인 범위, EPM LOW 60/80 Hz, ZEDi 게인, QX1222 저역컷,
-    // Signature 스테레오 HPF, X2442 스테레오 마이크 게인. 아래 값은 spec 표 그대로.
+    // Medium confidence (docs disagree on values or could not be confirmed from docs): Behringer low cut 75/80 Hz,
+    // Soundcraft Signature gain range, EPM LOW 60/80 Hz, ZEDi gain, QX1222 low cut,
+    // Signature stereo HPF, X2442 stereo mic gain. Values below are exactly the spec table.
     pub fn create(model: MixerModel) -> MixerProfile {
         use MixerModel::*;
         let (brand, name, pc_tip, groups) = match model {
