@@ -58,6 +58,20 @@ fn knobs(field: &str) -> Option<Positions> {
         .collect()
 }
 
+/// 0.5.0 and older wrote Korean mixer, group and knob labels: (old, new) so they still match the profiles.
+const LEGACY: [(&str, &str); 6] = [
+    ("1세대", "1st gen"),
+    ("VITA 프리앰프", "VITA preamps"),
+    ("스테레오 마이크", "stereo mic"),
+    ("모노/스테레오", "mono/stereo"),
+    ("모노 CH", "Mono CH"),
+    ("저역컷 ", "Low cut "),
+];
+
+fn english(s: &str) -> String {
+    LEGACY.iter().fold(s.to_owned(), |s, (old, new)| s.replace(old, new))
+}
+
 fn parse_line(line: &str) -> Option<Saved> {
     let f: Vec<&str> = line.split('\t').collect();
     let [name, mixer, group, nums @ ..] = f.as_slice() else { return None };
@@ -67,12 +81,12 @@ fn parse_line(line: &str) -> Option<Saved> {
     let (dynamic_range_db, bands_db) = sound(&nums[..26])?;
     let sample_rate = nums.get(26).map(|r| r.trim().parse()).transpose().ok()?;
     let knobs = match nums.get(27..) {
-        Some([k]) => Some(knobs(k)?),
+        Some([k]) => Some(knobs(&english(k))?),
         // 0.4.0's centre sound: checked, then dropped.
         Some(f) if !f.is_empty() => sound(f).map(|_| None)?,
         _ => None,
     };
-    Some(Saved { name: name.to_string(), mixer: mixer.to_string(), group: group.to_string(), dynamic_range_db, bands_db, sample_rate, knobs })
+    Some(Saved { name: name.to_string(), mixer: english(mixer), group: english(group), dynamic_range_db, bands_db, sample_rate, knobs })
 }
 
 /// The sounds, and the first line (1-based) that does not parse (hand edits, truncation); those are skipped.
@@ -173,7 +187,7 @@ mod tests {
                 dynamic_range_db: 12.25, bands_db: std::array::from_fn(|i| -1.5 * i as f32), sample_rate: Some(48_000), knobs: None }
     }
     fn with_knobs(name: &str) -> Saved {
-        let k = [("저역컷 100Hz", 1.0), ("HIGH 12kHz", 6.0), ("FREQ", 800.0), ("MID", -6.0), ("LOW 80Hz", -3.0), ("COMP", 30.0)];
+        let k = [("Low cut 100Hz", 1.0), ("HIGH 12kHz", 6.0), ("FREQ", 800.0), ("MID", -6.0), ("LOW 80Hz", -3.0), ("COMP", 30.0)];
         Saved { knobs: Some(k.iter().map(|&(l, v)| (l.to_owned(), v)).collect()), ..sample(name) }
     }
     /// A 0.4.0 line: 30 fields, then the centre dynamic range and 25 bands.
@@ -184,7 +198,7 @@ mod tests {
         let s = with_knobs("가");
         let line = to_line(&s);
         assert_eq!(line.split('\t').count(), 31);
-        assert_eq!(line.rsplit('\t').next(), Some("저역컷 100Hz=1;HIGH 12kHz=6;FREQ=800;MID=-6;LOW 80Hz=-3;COMP=30"));
+        assert_eq!(line.rsplit('\t').next(), Some("Low cut 100Hz=1;HIGH 12kHz=6;FREQ=800;MID=-6;LOW 80Hz=-3;COMP=30"));
         assert_eq!(parse(&line), (vec![s], None));
     }
     #[test] fn older_lines_have_no_knobs() {
@@ -240,6 +254,23 @@ mod tests {
     }
     #[test] fn bom_is_stripped() {
         assert_eq!(parse(&format!("\u{feff}{}\n", to_line(&sample("가")))), (vec![sample("가")], None));
+    }
+    #[test] fn legacy_korean_labels_read_as_english() {
+        use crate::mixers::{MixerFactory, MixerModel};
+        // A 0.5.0 line: Korean mixer, group and knob labels. The name is the user's and stays.
+        let line = format!("홍길동\tMackie ProFX22 (1세대, 2011)\tCH15-18 (스테레오 마이크){}\t48000\t저역컷 100Hz=1;HIGH 12kHz=6;MID 2.5kHz=-3;LOW 80Hz=0",
+                           "\t1.00".repeat(26));
+        let (l, bad) = parse(&line);
+        let (p, s) = (MixerFactory::create(MixerModel::MackieProFx22), &l[0]);
+        assert_eq!((s.name.as_str(), s.mixer.clone(), s.group.as_str(), bad), ("홍길동", format!("{} {}", p.brand, p.name), p.groups[2].label, None));
+        assert!(crate::advice::fits(&p.groups[2], s.knobs.as_ref().unwrap()));
+        // Saving writes English.
+        let out = to_line(s);
+        assert!(out.starts_with("홍길동\tMackie ProFX22 (1st gen, 2011)\tCH15-18 (stereo mic)\t"), "{out}");
+        assert!(out.ends_with("\tLow cut 100Hz=1;HIGH 12kHz=6;MID 2.5kHz=-3;LOW 80Hz=0"), "{out}");
+        for (old, new) in [("ProFX22v2 (2015, VITA 프리앰프)", "ProFX22v2 (2015, VITA preamps)"), ("CH9-12 (모노/스테레오)", "CH9-12 (mono/stereo)"), ("모노 CH", "Mono CH")] {
+            assert_eq!(english(old), new);
+        }
     }
     #[test] fn clean_removes_tabs_and_newlines() { assert_eq!(clean("  홍길동\t목사\r\n\u{fffd}"), "홍길동 목사"); }
     #[test] fn upsert_replaces_same_name() {

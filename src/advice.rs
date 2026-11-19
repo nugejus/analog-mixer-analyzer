@@ -23,9 +23,9 @@ const TAKE_NOISE_DB: f32 = 0.8;
 const NOISE_Z: f32 = 2.75;
 /// χ² 99.9% value per degrees of freedom (EQ knob count): if d² of the whole turn amount exceeds it, it is not noise.
 const CHI2_999: [f32; 5] = [0.0, 10.83, 13.82, 16.27, 18.47];
-pub const NO_INPUT: &str = "입력 신호가 없습니다. 케이블과 입력장치를 확인하세요. macOS에서는 시스템 설정 > 개인정보 보호 및 보안 > 마이크에서 이 앱을 허용하세요.";
-const KEEP_TALKING: &str = "말소리가 부족합니다. [분석]을 다시 누르고 녹음이 끝날 때까지 평소처럼 말씀해 주세요.";
-pub const OVERLOAD: &str = "과부하 의심: 아날로그 단에서 눌리거나 COMP가 과한 경우입니다.";
+pub const NO_INPUT: &str = "No input signal. Check the cable and the input device. On macOS, allow this app in System Settings > Privacy & Security > Microphone.";
+const KEEP_TALKING: &str = "Not enough speech. Press [Analyze] again and keep talking normally until the recording ends.";
+pub const OVERLOAD: &str = "Possible overload: the analog stage is squashing the signal, or COMP is too strong.";
 
 fn weight(b: usize) -> f32 {
     if b == 23 { 0.5 } else { 1.0 }
@@ -199,7 +199,7 @@ fn knobs(group: &ChannelGroup, act: impl Fn(usize, bool) -> Action) -> Vec<Advic
         };
         match control {
             Control::Gain { .. } => push("GAIN".into(), false),
-            Control::LowCut { hz } => push(format!("저역컷 {}", fmt_hz(hz)), false),
+            Control::LowCut { hz } => push(format!("Low cut {}", fmt_hz(hz)), false),
             Control::HighShelf { hz } => push(format!("HIGH {}", fmt_hz(hz)), false),
             Control::LowShelf { hz } => push(format!("LOW {}", fmt_hz(hz)), false),
             Control::Comp => push("COMP".into(), false),
@@ -576,7 +576,7 @@ impl AdviceEngine {
         let mut notes = Vec::new();
         if let Some(f) = inp.feedback_hz {
             notes.push(format!(
-                "하울링 의심({}: 마이크와 스피커 거리 확인, FREQ를 해당 눈금에 두고 MID를 줄이세요)",
+                "Possible feedback at {}: check the mic-to-speaker distance, set FREQ there and turn MID down.",
                 fmt_hz(f)
             ));
         }
@@ -585,7 +585,7 @@ impl AdviceEngine {
         }
         if s.snr_db < 30.0 {
             notes.push(format!(
-                "주변 잡음이 큽니다(SNR {:.0}dB). GAIN보다 마이크를 입에 더 가깝게 하세요.",
+                "Background noise is high (SNR {:.0} dB). Move the mic closer to the mouth instead of raising GAIN.",
                 s.snr_db
             ));
         }
@@ -630,7 +630,7 @@ const FX12: MixerModel = MixerModel::MackieProFx12v3;
 #[test] fn low_boom_turns_low_ccw() {
     // Boom below the low-cut threshold (mean(63,80) − c0 > 3). 6 dB gives 3.23, so the switch turns on.
     let a = run(&mut AdviceEngine::new(), &group(V3, 0), &summary(|f| 5.0 * Shape::LowShelf(80.0).response(f)));
-    assert_eq!(act(&a, "저역컷 100Hz"), Action::Ok);
+    assert_eq!(act(&a, "Low cut 100Hz"), Action::Ok);
     let d = db_of(act(&a, "LOW 80Hz"));
     assert!((-7.5..=-3.0).contains(&d), "{d}");
     assert_eq!(act(&a, "HIGH 12kHz"), Action::Ok);
@@ -646,13 +646,13 @@ const FX12: MixerModel = MixerModel::MackieProFx12v3;
 }
 #[test] fn rumble_recommends_lowcut() {
     let a = run(&mut AdviceEngine::new(), &group(V3, 0), &summary(|f| if f < 90.0 { 12.0 } else { 0.0 }));
-    assert_eq!(act(&a, "저역컷 100Hz"), Action::SwitchOn);
+    assert_eq!(act(&a, "Low cut 100Hz"), Action::SwitchOn);
     assert_eq!(act(&a, "LOW 80Hz"), Action::Ok);
 }
 #[test] fn boom_over_switch_threshold_switches_on_without_low() {
     // A 6 dB boom has mean(63,80) − c0 = 3.23 > 3, so the switch turns on. LOW must not refill it with a boost (+2.9) on top.
     let a = run(&mut AdviceEngine::new(), &group(V3, 0), &summary(|f| 6.0 * Shape::LowShelf(80.0).response(f)));
-    assert_eq!(act(&a, "저역컷 100Hz"), Action::SwitchOn);
+    assert_eq!(act(&a, "Low cut 100Hz"), Action::SwitchOn);
     assert_eq!(act(&a, "LOW 80Hz"), Action::Ok);
 }
 #[test] fn clip_turns_gain_down() {
@@ -699,16 +699,16 @@ const FX12: MixerModel = MixerModel::MackieProFx12v3;
     let t = ltass_db(Voice::Male);
     let a = AdviceEngine::new().advise(&group(V3, 0), &Inputs { summary: Some(&s), target: &t, clipped_recently: false, feedback_hz: Some(2_500.0), silent: false, restore_dynamic_range_db: None, current: None });
     assert!(a.notes.iter().any(|n| n.contains("2.5kHz")));
-    assert!(a.notes.iter().any(|n| n.contains("마이크를")));
+    assert!(a.notes.iter().any(|n| n.contains("mic closer")));
 }
 #[test] fn silent_input_waits() {
     let t = ltass_db(Voice::Male);
     let mut e = AdviceEngine::new();
     let a = e.advise(&group(V3, 0), &Inputs { summary: None, target: &t, clipped_recently: false, feedback_hz: None, silent: true, restore_dynamic_range_db: None, current: None });
     assert!(a.knobs.iter().all(|k| k.action == Action::Wait));
-    assert!(a.notes.iter().any(|n| n.contains("입력 신호가 없습니다")));
+    assert!(a.notes.iter().any(|n| n.contains("No input signal")));
     let b = e.advise(&group(V3, 0), &Inputs { summary: None, target: &t, clipped_recently: false, feedback_hz: None, silent: false, restore_dynamic_range_db: None, current: None });
-    assert!(b.notes.iter().any(|n| n.contains("말소리가 부족합니다")));
+    assert!(b.notes.iter().any(|n| n.contains("Not enough speech")));
 }
 #[test] fn group_change_resets_state() {
     let mut e = AdviceEngine::new();
@@ -731,7 +731,7 @@ fn with(dev: impl Fn(f32) -> f32) -> [f32; 25] { let t = ltass_db(Voice::Male); 
 }
 #[test] fn preset_hpf_switch_not_chased_by_low() {
     let a = run_t(&group(V3, 0), &summary(|_| 0.0), with(|f| hpf_db(100.0, f)), None);
-    assert_eq!(act(&a, "저역컷 100Hz"), Action::SwitchOn);
+    assert_eq!(act(&a, "Low cut 100Hz"), Action::SwitchOn);
     assert_eq!(act(&a, "LOW 80Hz"), Action::Ok);
 }
 #[test] fn switch_already_on_is_quiet() {
@@ -739,14 +739,14 @@ fn with(dev: impl Fn(f32) -> f32) -> [f32; 25] { let t = ltass_db(Voice::Male); 
     assert!(a.knobs.iter().all(|k| k.action == Action::Ok), "{:?}", a.knobs);
 }
 #[test] fn normal_mode_never_switches_off() {
-    assert_eq!(act(&run_t(&group(V3, 0), &summary(|f| hpf_db(100.0, f)), with(|_| 0.0), None), "저역컷 100Hz"), Action::Ok);
+    assert_eq!(act(&run_t(&group(V3, 0), &summary(|f| hpf_db(100.0, f)), with(|_| 0.0), None), "Low cut 100Hz"), Action::Ok);
 }
 #[test] fn restore_switch_only_on() {
     // Off when saved, on now: do not say to turn it off (analysis starts from off).
     let off = run_t(&group(V3, 0), &summary(|f| hpf_db(100.0, f)), with(|_| 0.0), Some(10.0));
-    assert_eq!(act(&off, "저역컷 100Hz"), Action::Ok);
+    assert_eq!(act(&off, "Low cut 100Hz"), Action::Ok);
     let on = run_t(&group(V3, 0), &summary(|_| 0.0), with(|f| hpf_db(100.0, f)), Some(10.0));
-    assert_eq!(act(&on, "저역컷 100Hz"), Action::SwitchOn);
+    assert_eq!(act(&on, "Low cut 100Hz"), Action::SwitchOn);
     assert_eq!(act(&on, "LOW 80Hz"), Action::Ok);
 }
 #[test] fn restore_lifts_low_boost_cap() {
@@ -895,7 +895,7 @@ fn plus(a: [f32; 25], b: [f32; 25]) -> [f32; 25] { std::array::from_fn(|i| a[i] 
     assert!(matches!(c, Action::Rotate { .. }), "{c:?}");
     assert_eq!(act(&run_k(&g, &s, t, None, Some(&centre(&g))), "LOW 80Hz"), c);
 }
-const V3_LABEL: [(&str, f32); 5] = [("저역컷 100Hz", 1.0), ("HIGH 12kHz", 6.0), ("FREQ", 800.0), ("MID", -6.0), ("LOW 80Hz", -3.0)];
+const V3_LABEL: [(&str, f32); 5] = [("Low cut 100Hz", 1.0), ("HIGH 12kHz", 6.0), ("FREQ", 800.0), ("MID", -6.0), ("LOW 80Hz", -3.0)];
 /// Set to label k and re-record: today's sound = saved sound (centered sound + k) + today, restore mode, K = k.
 fn retake(g: &ChannelGroup, k: &Positions, today: impl Fn(f32) -> f32) -> AdviceSet {
     let saved = plus(summary(|_| 0.0).bands_db, model(g, k));
@@ -910,14 +910,14 @@ fn retake(g: &ChannelGroup, k: &Positions, today: impl Fn(f32) -> f32) -> Advice
         Action::Rotate { degrees, db } => assert!((10.0..=12.0).contains(&db) && (40.0..=60.0).contains(&degrees), "{db} {degrees}"),
         x => panic!("{x:?}"),
     }
-    for l in ["FREQ", "MID", "LOW 80Hz", "저역컷 100Hz", "COMP"] { assert_eq!(act(&a, l), Action::Ok, "{l}: {:?}", a.knobs); }
+    for l in ["FREQ", "MID", "LOW 80Hz", "Low cut 100Hz", "COMP"] { assert_eq!(act(&a, l), Action::Ok, "{l}: {:?}", a.knobs); }
 }
 /// Fixed noise of ±1 dB per band.
 const NOISE: [f32; 25] = [-1., 1., -1., -1., -1., -1., 1., 1., 1., 1., 1., -1., -1., 1., -1., 1., 1., -1., -1., -1., 1., -1., -1., 1., -1.];
 fn noise(f: f32) -> f32 { NOISE[BANDS_HZ.iter().position(|&b| b == f).unwrap()] }
 #[test] fn take_noise_alone_is_all_ok() {
     // With a fixed 2.5 dB ✓ range, it said to turn LOW 35° (80 Hz), 55° (60 Hz of Signature 12).
-    let sig = [("저역컷 100Hz", 1.0), ("HIGH 12kHz", 4.0), ("FREQ", 2500.0), ("MID", -4.0), ("LOW 60Hz", -3.0)];
+    let sig = [("Low cut 100Hz", 1.0), ("HIGH 12kHz", 4.0), ("FREQ", 2500.0), ("MID", -4.0), ("LOW 60Hz", -3.0)];
     for (m, set) in [(V3, V3_LABEL), (MixerModel::SoundcraftSignature12, sig)] {
         let g = group(m, 0);
         let a = retake(&g, &pos(&g, &set), noise);
@@ -936,9 +936,9 @@ fn noise(f: f32) -> f32 { NOISE[BANDS_HZ.iter().position(|&b| b == f).unwrap()] 
     let g = group(V3, 0);
     let a = retake(&g, &pos(&g, &V3_LABEL), |f| -6.0 * Shape::LowShelf(80.0).response(f));
     assert!(matches!(act(&a, "LOW 80Hz"), Action::Rotate { degrees, .. } if degrees > 0.0), "{:?}", a.knobs);
-    for l in ["HIGH 12kHz", "FREQ", "MID", "저역컷 100Hz"] { assert_eq!(act(&a, l), Action::Ok, "{l}: {:?}", a.knobs); }
+    for l in ["HIGH 12kHz", "FREQ", "MID", "Low cut 100Hz"] { assert_eq!(act(&a, l), Action::Ok, "{l}: {:?}", a.knobs); }
     // LOW overlapping a FREQ 125 Hz MID has a noise ✓ range of a bit over 10 dB, but a 9 dB boom puts the whole turn amount (d²) outside noise.
-    let k = pos(&g, &[("저역컷 100Hz", 1.0), ("FREQ", 125.0), ("MID", -6.0), ("LOW 80Hz", -3.0)]);
+    let k = pos(&g, &[("Low cut 100Hz", 1.0), ("FREQ", 125.0), ("MID", -6.0), ("LOW 80Hz", -3.0)]);
     let a = retake(&g, &k, |f| 9.0 * Shape::LowShelf(80.0).response(f));
     assert!(matches!(act(&a, "LOW 80Hz"), Action::Rotate { degrees, .. } if degrees < 0.0), "{:?}", a.knobs);
 }
@@ -958,9 +958,9 @@ fn noise(f: f32) -> f32 { NOISE[BANDS_HZ.iter().position(|&b| b == f).unwrap()] 
     s.dynamic_range_db = 22.0; // normal COMP rule (crest ≥ 9, DR > 18) true, low-cut threshold false
     let t = ltass_db(Voice::Male);
     let c = run_t(&g, &s, t, None);
-    assert_eq!((act(&c, "저역컷 100Hz"), act(&c, "COMP")), (Action::Ok, Action::Rotate { degrees: 30.0, db: 0.0 }));
-    let a = run_k(&g, &s, t, None, Some(&pos(&g, &[("저역컷 100Hz", 1.0), ("COMP", 30.0)])));
-    assert_eq!((act(&a, "저역컷 100Hz"), act(&a, "COMP")), (Action::Ok, Action::Ok));
+    assert_eq!((act(&c, "Low cut 100Hz"), act(&c, "COMP")), (Action::Ok, Action::Rotate { degrees: 30.0, db: 0.0 }));
+    let a = run_k(&g, &s, t, None, Some(&pos(&g, &[("Low cut 100Hz", 1.0), ("COMP", 30.0)])));
+    assert_eq!((act(&a, "Low cut 100Hz"), act(&a, "COMP")), (Action::Ok, Action::Ok));
     let comp = |v| act(&run_k(&g, &s, t, None, Some(&pos(&g, &[("COMP", v)]))), "COMP");
     assert_eq!(comp(0.0), Action::Rotate { degrees: 30.0, db: 0.0 });
     assert_eq!(comp(15.0), Action::Rotate { degrees: 15.0, db: 0.0 });
@@ -974,7 +974,7 @@ fn noise(f: f32) -> f32 { NOISE[BANDS_HZ.iter().position(|&b| b == f).unwrap()] 
     let mut renamed = centre(&g);
     renamed[1].0 = "HIGH".into();
     assert!(!fits(&g, &renamed));
-    let p = pos(&g, &[("저역컷 100Hz", 1.0), ("HIGH 12kHz", 6.0), ("FREQ", 800.0), ("MID", -6.0), ("LOW 80Hz", -3.0), ("COMP", 30.0)]);
+    let p = pos(&g, &[("Low cut 100Hz", 1.0), ("HIGH 12kHz", 6.0), ("FREQ", 800.0), ("MID", -6.0), ("LOW 80Hz", -3.0), ("COMP", 30.0)]);
     assert_eq!(targets(&as_advice(&g, &p), &centre(&g)), p);
     assert_eq!(freq_choices(g.controls[3]), BANDS_HZ[2..=21]); // 100 Hz–8 kHz
     assert!(freq_choices(group(FX12, 0).controls[3]).is_empty());
@@ -994,7 +994,7 @@ fn restore_from_centre(g: &ChannelGroup, fin: [f32; 25]) -> AdviceSet { run_t(g,
     assert!(matches!(act(&k, "FREQ"), Action::SetFreq { hz } if [630.0, 800.0, 1000.0].contains(&hz)), "{:?}", k.knobs);
     assert!((-7.0..=-5.0).contains(&db_of(act(&k, "MID"))), "{:?}", k.knobs);
     assert!((-4.0..=-2.0).contains(&db_of(act(&k, "LOW 80Hz"))), "{:?}", k.knobs);
-    assert_eq!(act(&k, "저역컷 100Hz"), Action::SwitchOn);
+    assert_eq!(act(&k, "Low cut 100Hz"), Action::SwitchOn);
     assert_eq!(act(&k, "GAIN"), Action::Ok);
 }
 #[test] fn recovers_signature22_two_sweeps() {
@@ -1012,7 +1012,7 @@ fn restore_from_centre(g: &ChannelGroup, fin: [f32; 25]) -> AdviceSet { run_t(g,
     assert!(matches!(act(&k, "FREQ 2"), Action::SetFreq { hz } if [160.0, 200.0, 250.0].contains(&hz)), "{:?}", k.knobs);
     assert!((-5.0..=-3.0).contains(&db_of(act(&k, "MID 2"))), "{:?}", k.knobs);
     assert_eq!(act(&k, "LOW 60Hz"), Action::Ok);
-    assert_eq!(act(&k, "저역컷 100Hz"), Action::SwitchOn);
+    assert_eq!(act(&k, "Low cut 100Hz"), Action::SwitchOn);
 }
 #[test] fn finds_75hz_low_cut_under_a_low_mid_cut() {
     // The 75 Hz switch differs only 3.3 dB between 63·80 Hz and 125·160 Hz, so a FREQ 200 MID cut lowering 125·160 Hz buried it.
@@ -1020,12 +1020,12 @@ fn restore_from_centre(g: &ChannelGroup, fin: [f32; 25]) -> AdviceSet { run_t(g,
     let flat = ltass_db(Voice::Male);
     for (bell, db) in [(160.0, -4.0), (200.0, -5.0), (250.0, -6.0)] {
         let k = restore_from_centre(&g, std::array::from_fn(|b| flat[b] + hpf_db(75.0, BANDS_HZ[b]) + db * Shape::Bell(bell).response(BANDS_HZ[b])));
-        assert_eq!(act(&k, "저역컷 75Hz"), Action::SwitchOn, "{bell} {db}: {:?}", k.knobs);
+        assert_eq!(act(&k, "Low cut 75Hz"), Action::SwitchOn, "{bell} {db}: {:?}", k.knobs);
         assert_eq!(act(&k, "LOW 80Hz"), Action::Ok, "{bell} {db}: {:?}", k.knobs);
     }
     // Cutting only LOW is not the switch.
     let k = restore_from_centre(&g, std::array::from_fn(|b| flat[b] - 6.0 * Shape::LowShelf(80.0).response(BANDS_HZ[b])));
-    assert_eq!(act(&k, "저역컷 75Hz"), Action::Ok);
+    assert_eq!(act(&k, "Low cut 75Hz"), Action::Ok);
 }
 #[test] fn same_centre_sound_restores_all_ok() {
     let k = restore_from_centre(&group(V3, 0), ltass_db(Voice::Male));

@@ -39,35 +39,35 @@ pub struct Preset {
 
 /// spec "Settings table". Index 0 = default.
 pub const PRESETS: [Preset; 6] = [
-    Preset { category: "기본", name: "자연스러운 목소리", when: "목소리를 있는 그대로 자연스럽게 맞춥니다.", moves: &[] },
+    Preset { category: "Default", name: "Natural voice", when: "Keeps the voice natural, as it is.", moves: &[] },
     Preset {
-        category: "찬양인도자",
-        name: "또렷한 찬양 인도",
-        when: "밴드 소리에 인도자 목소리가 묻히고 가사가 잘 안 들릴 때",
+        category: "Worship leader",
+        name: "Clear lead",
+        when: "When the band buries the leader's voice and the lyrics are hard to hear",
         moves: &[Move::Hpf(100.0), Move::Bell(4000.0, 3.0, 0.0), Move::HighShelf(10000.0, 2.5)],
     },
     Preset {
-        category: "찬양인도자",
-        name: "가벼운 찬양 인도",
-        when: "밴드와 섞일 때 목소리가 두껍고 웅웅거릴 때(특히 남성 인도자)",
+        category: "Worship leader",
+        name: "Lighter lead",
+        when: "When the voice sounds thick and boomy in the band mix (especially male leaders)",
         moves: &[Move::Hpf(100.0), Move::Bell(300.0, -4.5, 0.0), Move::HighShelf(10000.0, 2.5)],
     },
     Preset {
-        category: "설교자",
-        name: "명료한 설교",
-        when: "설교 말씀을 더 또렷하게 들리게 하고 싶을 때",
+        category: "Preacher",
+        name: "Clear sermon",
+        when: "When you want the sermon to come through more clearly",
         moves: &[Move::Hpf(100.0), Move::Bell(3000.0, 4.0, 0.0)],
     },
     Preset {
-        category: "보조보컬",
-        name: "리드 뒤로",
-        when: "보조보컬이 인도자와 겹쳐 같이 앞으로 튀어나올 때",
+        category: "Backing vocal",
+        name: "Behind the lead",
+        when: "When a backing vocal competes with the leader and jumps out front",
         moves: &[Move::Hpf(100.0), Move::Bell(3750.0, -3.0, 0.0)],
     },
     Preset {
-        category: "보조보컬",
-        name: "남성 보조보컬",
-        when: "남성 보조보컬의 저음이 두꺼워 인도자나 악기를 덮을 때",
+        category: "Backing vocal",
+        name: "Male backing",
+        when: "When a male backing vocal's thick low end covers the leader or the instruments",
         moves: &[Move::Hpf(135.0), Move::Bell(300.0, -4.5, 0.0)],
     },
 ];
@@ -122,14 +122,14 @@ pub fn preset_target(p: &Preset, voice: Voice, group: &ChannelGroup) -> ([f32; 2
 
 /// Tone-colour ranges (name, lo Hz, hi Hz); a third-octave centre in [lo, hi) belongs to it.
 pub const TONE_BANDS: [(&str, f32, f32); 8] = [
-    ("웅웅거림", 80.0, 250.0),
-    ("먹먹함", 250.0, 500.0),
-    ("통 울림", 500.0, 800.0),
-    ("비음", 800.0, 1500.0),
-    ("까랑함", 1500.0, 3000.0),
-    ("쏘는 소리", 3000.0, 5000.0),
-    ("치찰음", 5000.0, 10000.0),
-    ("공기감", 10000.0, 20000.0),
+    ("Boom", 80.0, 250.0),
+    ("Mud", 250.0, 500.0),
+    ("Boxy", 500.0, 800.0),
+    ("Nasal", 800.0, 1500.0),
+    ("Harsh", 1500.0, 3000.0),
+    ("Sharp", 3000.0, 5000.0),
+    ("Sibilance", 5000.0, 10000.0),
+    ("Air", 10000.0, 20000.0),
 ];
 
 /// A tone band this far above (red) or below (blue) the reference is flagged on the graph.
@@ -178,9 +178,9 @@ mod tests {
     fn g(m: MixerModel) -> crate::mixers::ChannelGroup { MixerFactory::create(m).groups.remove(0) }
     #[test] fn preset_table_matches_spec() {
         let c: Vec<_> = PRESETS.iter().map(|p| p.category).collect();
-        assert_eq!(c, ["기본", "찬양인도자", "찬양인도자", "설교자", "보조보컬", "보조보컬"]);
+        assert_eq!(c, ["Default", "Worship leader", "Worship leader", "Preacher", "Backing vocal", "Backing vocal"]);
         let n: Vec<_> = PRESETS.iter().map(|p| p.name).collect();
-        assert_eq!(n, ["자연스러운 목소리", "또렷한 찬양 인도", "가벼운 찬양 인도", "명료한 설교", "리드 뒤로", "남성 보조보컬"]);
+        assert_eq!(n, ["Natural voice", "Clear lead", "Lighter lead", "Clear sermon", "Behind the lead", "Male backing"]);
         assert_eq!(PRESETS[1].moves, [Move::Hpf(100.0), Move::Bell(4000.0, 3.0, 0.0), Move::HighShelf(10000.0, 2.5)]);
         assert_eq!(PRESETS[5].moves, [Move::Hpf(135.0), Move::Bell(300.0, -4.5, 0.0)]);
     }
@@ -263,7 +263,7 @@ mod tests {
         let mut m = reference;
         m[14..=16].iter_mut().for_each(|v| *v += 6.0); // 1600, 2000, 2500 = harshness
         let e = tone_excess(&m, &reference);
-        assert_eq!(TONE_BANDS[4].0, "까랑함");
+        assert_eq!(TONE_BANDS[4].0, "Harsh");
         assert!((e[4] - 6.0).abs() < 0.01 && e[3].abs() < 1e-4 && e[5].abs() < 1e-4);
     }
 }

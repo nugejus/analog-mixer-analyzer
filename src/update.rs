@@ -56,7 +56,7 @@ pub fn download(url: &str, dest: &Path) -> std::io::Result<()> {
     let err = String::from_utf8_lossy(&out.stderr);
     let err = err.trim();
     Err(std::io::Error::other(if err.is_empty() {
-        format!("curl 종료 코드 {}", out.status.code().map_or("?".into(), |c| c.to_string()))
+        format!("curl exit code {}", out.status.code().map_or("?".into(), |c| c.to_string()))
     } else {
         err.to_string()
     }))

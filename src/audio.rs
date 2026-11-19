@@ -43,7 +43,7 @@ pub fn open(device: Option<&str>) -> Result<Input, String> {
                 .find(|d| name(d).as_deref() == Some(want))
         })
         .or_else(|| host.default_input_device())
-        .ok_or("입력 장치가 없습니다")?;
+        .ok_or("No input device")?;
     let sup = dev.default_input_config().map_err(|e| e.to_string())?;
     let (sample_rate, channels) = (sup.sample_rate() as f32, sup.channels() as usize);
     let (tx, rx) = RingBuffer::new(sample_rate as usize * channels * 2);
@@ -53,7 +53,7 @@ pub fn open(device: Option<&str>) -> Result<Input, String> {
         SampleFormat::I16 => build::<i16>(&dev, cfg, tx),
         SampleFormat::I32 => build::<i32>(&dev, cfg, tx),
         SampleFormat::U16 => build::<u16>(&dev, cfg, tx),
-        f => return Err(format!("지원하지 않는 샘플 형식입니다: {f}")),
+        f => return Err(format!("Unsupported sample format: {f}")),
     }
     .map_err(|e| e.to_string())?;
     stream.play().map_err(|e| e.to_string())?;
